@@ -4,5 +4,6 @@ __pycache__/
 *.pyc
 .env
 error_screenshot.png
+.idea/
 log.txt
 new_xpath.txt
