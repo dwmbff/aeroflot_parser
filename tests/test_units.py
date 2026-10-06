@@ -75,6 +75,12 @@ class HtmlPreparationTests(unittest.TestCase):
         self.assertLessEqual(len(snippet), 1000)
         self.assertIn("Откуда", snippet)
 
+    def test_truncate_prefers_keyword_inside_placeholder(self):
+        text_mention = "обратно " + "a" * 30000
+        field = '<input placeholder="Обратно">' + "b" * 30000
+        snippet = ai_fallback._truncate_html(text_mention + field, "Поле «Обратно»", max_chars=2000)
+        self.assertIn('placeholder="Обратно"', snippet)
+
 
 class CheckerAndResolverTests(unittest.TestCase):
     ELEMENTS = [

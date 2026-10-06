@@ -83,6 +83,22 @@ def _extract_keywords(notes: str) -> list[str]:
     return unique
 
 
+def _find_keyword(lowered_html: str, keyword: str) -> int:
+    """
+    Позиция ключевого слова в HTML. Слово часто встречается в обычном тексте страницы
+    раньше, чем в нужном поле формы, поэтому вхождение внутри атрибута
+    placeholder/aria-label предпочитаем первому попавшемуся.
+    """
+    first = lowered_html.find(keyword)
+    idx = first
+    while idx >= 0:
+        before = lowered_html[max(0, idx - 30) : idx]
+        if 'placeholder="' in before or 'aria-label="' in before:
+            return idx
+        idx = lowered_html.find(keyword, idx + 1)
+    return first
+
+
 def _truncate_html(html: str, notes: str, max_chars: int = HTML_MAX_CHARS) -> str:
     """Обрезать HTML до релевантного фрагмента (~max_chars символов)."""
     if len(html) <= max_chars:
@@ -90,7 +106,7 @@ def _truncate_html(html: str, notes: str, max_chars: int = HTML_MAX_CHARS) -> st
 
     lowered = html.lower()
     for keyword in _extract_keywords(notes):
-        idx = lowered.find(keyword.lower())
+        idx = _find_keyword(lowered, keyword.lower())
         if idx < 0:
             continue
         start = max(0, idx - HTML_CONTEXT_RADIUS)
