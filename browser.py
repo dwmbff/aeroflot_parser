@@ -10,7 +10,6 @@ from playwright.sync_api import (
     BrowserContext,
     Page,
     Playwright,
-    TimeoutError as PlaywrightTimeoutError,
     sync_playwright,
 )
 
@@ -20,6 +19,14 @@ from checker import check_element_inline, log_event
 
 ResultsBranch = Literal["flights", "empty"]
 
+# --- Известное ограничение: защита сайта от автоматизации -----------------------
+# aeroflot.ru показывает «Доступ к сайту временно ограничен», если видит
+# стандартный headless-Chromium (проверено: без этих настроек страница с формой
+# не открывается). Для учебной задачи используются три настройки ниже — как в
+# исходном варианте проекта. Это обход защиты сайта, поэтому: скрипт делает один
+# прогон за запуск с паузами между действиями, ничего не покупает и не
+# авторизуется; для регулярного или промышленного использования нужно
+# разрешение владельца сайта или официальный API (см. ANALYTICS.md, раздел 11).
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -110,10 +117,6 @@ class ErrorState:
     has_error: bool
     title_visible: bool
     box_visible: bool
-
-
-def xpath_locator(page: Page, xpath: str):
-    return page.locator(f"xpath={xpath}")
 
 
 def _pause(page: Page, ms: int = 500) -> None:
@@ -321,7 +324,7 @@ def _fill_city_field(
 
 def check_dropdown_visible(page: Page, suggest_element: dict[str, Any]) -> Optional[dict[str, Any]]:
     """Проверить видимость дропдауна подсказок до выбора города."""
-    return check_element_inline(page, suggest_element, require_visible=True)
+    return check_element_inline(page, suggest_element)
 
 
 def fill_from_input(
@@ -426,28 +429,6 @@ def wait_results_ready(page: Page, timeout: int = 60000) -> ResultsBranch:
         _pause(page, 800)
 
     raise TimeoutError("Результаты поиска не загрузились в отведённое время")
-
-
-def reload_results_page(page: Page, timeout: int = 60000) -> ResultsBranch:
-    """Перезагрузить страницу результатов и дождаться готовности."""
-    last_error: Optional[Exception] = None
-
-    for attempt in range(2):
-        try:
-            page.reload(wait_until="domcontentloaded", timeout=min(timeout, 45000))
-        except PlaywrightTimeoutError:
-            pass
-        accept_cookies(page)
-        check_and_close_popup(page)
-        _pause(page, 3000 + attempt * 2000)
-        try:
-            return wait_results_ready(page, timeout=timeout)
-        except TimeoutError as exc:
-            last_error = exc
-
-    raise TimeoutError(
-        str(last_error) if last_error else "Результаты поиска не загрузились в отведённое время"
-    )
 
 
 def click_after_results_1(page: Page) -> None:

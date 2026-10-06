@@ -1,3 +1,11 @@
+"""
+Проверка элементов страницы по xpath из elements.json и запись результатов в log.txt.
+
+Модуль отвечает только за ответ на вопрос «элемент на странице есть или нет»
+и за журнал. Сами действия (клики, ввод) — в browser.py, поиск с запасными
+вариантами — в resolver.py.
+"""
+
 from __future__ import annotations
 
 import json
@@ -11,23 +19,16 @@ import config
 
 CHECK_TIMEOUT_MS = 5000
 
-ALT_FLOW_STAGES = frozenset()
-
 
 @dataclass
 class StageCheckResult:
     missing: list[dict[str, Any]] = field(default_factory=list)
     ok_count: int = 0
-    skipped_count: int = 0
 
 
 def load_elements() -> list[dict[str, Any]]:
     with config.ELEMENTS_FILE.open(encoding="utf-8") as f:
         return json.load(f)
-
-
-def get_elements_by_stage(elements: list[dict[str, Any]], stage: str) -> list[dict[str, Any]]:
-    return [el for el in elements if el.get("stage") == stage]
 
 
 def get_element_by_name(elements: list[dict[str, Any]], name: str) -> Optional[dict[str, Any]]:
@@ -41,18 +42,28 @@ def _timestamp() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _write_log_line(line: str) -> None:
+def sanitize_for_log(text: str, limit: int = 600) -> str:
+    """
+    Привести произвольный текст (ответ модели, текст ошибки) к одной строке.
+    Без этого переводы строк в ответе внешнего сервиса позволили бы подделать
+    чужие записи в журнале (log injection).
+    """
+    one_line = " ".join(str(text).split())
+    return one_line if len(one_line) <= limit else one_line[:limit] + "…"
+
+
+def write_log_line(line: str) -> None:
     with config.LOG_FILE.open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
+        f.write(f"[{_timestamp()}] {line}\n")
 
 
 def log_event(message: str) -> None:
     """Служебная запись в log.txt (запуск, ошибки, попапы и т.д.)."""
-    _write_log_line(f"[{_timestamp()}] [EVENT] {message}")
+    write_log_line(f"[EVENT] {sanitize_for_log(message)}")
 
 
 def _log_check_result(status: str, name: str, xpath: str) -> None:
-    _write_log_line(f"[{_timestamp()}] [{status}] {name}: {xpath}")
+    write_log_line(f"[{status}] {name}: {xpath}")
 
 
 def _is_action_ready(element: dict[str, Any], completed_actions: set[str]) -> bool:
@@ -89,6 +100,7 @@ def _eligible_elements(
     stage: str,
     completed_actions: set[str],
 ) -> list[dict[str, Any]]:
+    """Элементы стадии, которые уже можно проверять (их action_before выполнен)."""
     return [
         el
         for el in elements
@@ -121,54 +133,43 @@ def _evaluate_element(
     page: Page,
     element: dict[str, Any],
     *,
-    require_visible: bool = False,
     elements: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[bool, bool]:
     """
-    Проверить один элемент.
-    require_visible управляет строгостью поиска (видимость vs просто наличие в DOM)
-    и НЕ связан с тем, обязателен элемент или нет — это отдельная проверка
-    через _is_optional() ниже.
-    Возвращает (found, optional_absent_ok).
+    Проверить, что элемент виден на странице.
+    Возвращает (found, optional_absent_ok): второе значение True, если элемента
+    нет, но он помечен optional и его отсутствие — штатная ситуация.
     """
     xpath = element.get("xpath", "")
-    if require_visible and element.get("stage") == "global_error" and elements is not None:
+    if element.get("stage") == "global_error" and elements is not None:
         found = _global_error_element_found(page, element, elements)
     else:
-        found = (
-            _element_visible(page, xpath)
-            if require_visible
-            else _element_on_page(page, xpath)
-        )
+        found = _element_visible(page, xpath)
     if found:
         return True, False
-    if _is_optional(element):
-        return False, True
-    return False, False
+    return False, _is_optional(element)
 
 
-def check_branch_inactive_element(page: Page, element: dict[str, Any]) -> None:
-    """Залогировать элемент альтернативной ветки результатов, не активной в этом прогоне."""
-    name = element.get("name", "")
-    xpath = element.get("xpath", "")
-    _log_check_result("OK - not present, branch inactive", name, xpath)
+def log_inactive_branch(element: dict[str, Any]) -> None:
+    """Залогировать элемент ветки результатов, которая в этом прогоне не активна."""
+    _log_check_result(
+        "OK - not present, branch inactive",
+        element.get("name", ""),
+        element.get("xpath", ""),
+    )
 
 
 def check_element_inline(
     page: Page,
     element: dict[str, Any],
-    *,
-    require_visible: bool = True,
 ) -> Optional[dict[str, Any]]:
     """
     Проверить элемент в конкретный момент сценария (вне check_elements по stage).
-    Возвращает element dict только если элемент обязателен и не найден.
+    Возвращает element только если он обязателен и не найден.
     """
     name = element.get("name", "")
     xpath = element.get("xpath", "")
-    found, optional_absent = _evaluate_element(
-        page, element, require_visible=require_visible, elements=None
-    )
+    found, optional_absent = _evaluate_element(page, element)
 
     if found:
         _log_check_result("OK", name, xpath)
@@ -181,39 +182,6 @@ def check_element_inline(
     return element
 
 
-def _opposite_alt_flow(stage: str) -> Optional[str]:
-    if stage == "results_flow_1":
-        return "results_flow_2"
-    if stage == "results_flow_2":
-        return "results_flow_1"
-    return None
-
-
-def _is_opposite_flow_active(
-    page: Page,
-    elements: list[dict[str, Any]],
-    stage: str,
-    completed_actions: set[str],
-) -> bool:
-    """Пропуск alt-flow только если противоположная ветка уже была выполнена на этой странице."""
-    opposite = _opposite_alt_flow(stage)
-    if opposite is None:
-        return False
-
-    opposite_entry_actions = {
-        "results_flow_1": "click_after_results_1",
-        "results_flow_2": "open_result2_panel",
-    }
-    entry_action = opposite_entry_actions.get(opposite)
-    if not entry_action or entry_action not in completed_actions:
-        return False
-
-    for el in _eligible_elements(elements, opposite, completed_actions):
-        if _element_on_page(page, el.get("xpath", ""), timeout_ms=CHECK_TIMEOUT_MS):
-            return True
-    return False
-
-
 def check_elements(
     page: Page,
     elements: list[dict[str, Any]],
@@ -224,78 +192,29 @@ def check_elements(
     Проверить элементы текущего stage с учётом action_before.
 
     - Пропускает элементы, чей action_before ещё не выполнен.
-    - Логирует [OK] / [MISSING] / [SKIPPED - alt flow active] в log.txt.
-    - Возвращает missing элементы (без SKIPPED) и счётчики ok/skipped.
+    - Логирует [OK] / [OK - not present, optional] / [MISSING] в log.txt.
+    - Возвращает missing-элементы и число успешных проверок.
     """
     actions = completed_actions if completed_actions is not None else set()
-    to_check = _eligible_elements(elements, current_stage, actions)
-    missing: list[dict[str, Any]] = []
-    ok_count = 0
-    skipped_count = 0
+    result = StageCheckResult()
 
-    opposite_active = (
-        _is_opposite_flow_active(page, elements, current_stage, actions)
-        if current_stage in ALT_FLOW_STAGES
-        else False
-    )
-
-    for element in to_check:
+    for element in _eligible_elements(elements, current_stage, actions):
         name = element.get("name", "")
         xpath = element.get("xpath", "")
 
         found, optional_absent = _evaluate_element(
             page,
             element,
-            require_visible=True,
             elements=elements if current_stage == "global_error" else None,
         )
         if found:
             _log_check_result("OK", name, xpath)
-            ok_count += 1
-            continue
-        if optional_absent:
+            result.ok_count += 1
+        elif optional_absent:
             _log_check_result("OK - not present, optional", name, xpath)
-            ok_count += 1
-            continue
+            result.ok_count += 1
+        else:
+            _log_check_result("MISSING", name, xpath)
+            result.missing.append(element)
 
-        if current_stage in ALT_FLOW_STAGES and opposite_active:
-            _log_check_result("SKIPPED - alt flow active", name, xpath)
-            skipped_count += 1
-            continue
-
-        _log_check_result("MISSING", name, xpath)
-        missing.append(element)
-
-    return StageCheckResult(missing=missing, ok_count=ok_count, skipped_count=skipped_count)
-
-
-class ElementChecker:
-    """Обёртка над check_elements с отслеживанием выполненных action_before."""
-
-    def __init__(self, elements: list[dict[str, Any]]) -> None:
-        self.elements = elements
-        self.completed_actions: set[str] = set()
-
-    def mark_action(self, action: str) -> None:
-        self.completed_actions.add(action)
-
-    def check_stage(self, page: Page, stage: str) -> StageCheckResult:
-        """Проверить stage и вернуть результат с missing элементами."""
-        return check_elements(page, self.elements, stage, self.completed_actions)
-
-    def element_exists(self, page: Page, xpath: str, *, visible: bool = False) -> bool:
-        locator = page.locator(f"xpath={xpath}")
-        if locator.count() == 0:
-            return False
-        if visible:
-            return locator.first.is_visible()
-        return True
-
-    def require(self, page: Page, name: str, *, visible: bool = False) -> bool:
-        element = get_element_by_name(self.elements, name)
-        if element is None:
-            raise KeyError(f"Элемент '{name}' не описан в elements.json")
-        if visible:
-            locator = page.locator(f"xpath={element['xpath']}")
-            return locator.count() > 0 and locator.first.is_visible()
-        return _element_on_page(page, element["xpath"])
+    return result
