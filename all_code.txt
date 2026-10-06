@@ -1,0 +1,1752 @@
+=== FILE: ./ai_fallback.py ===
+from __future__ import annotations
+
+import json
+import re
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Optional
+
+from openai import APIStatusError, OpenAI
+from playwright.sync_api import Page
+
+import config
+from browser import xpath_locator
+
+HTML_MAX_CHARS = 15000
+HTML_CONTEXT_RADIUS = 7500
+RATE_LIMIT_RETRY_DELAY_SEC = 2.5
+MAX_API_ATTEMPTS = 2
+
+
+@dataclass
+class FallbackResult:
+    found: bool
+    new_xpath: str
+    confidence: str
+    reasoning: str
+
+
+def _timestamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _log_ai_fallback_failed(element_name: str, details: str) -> None:
+    with config.LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"[{_timestamp()}] [AI_FALLBACK_FAILED] {element_name}: {details}\n")
+
+
+def _build_client() -> OpenAI:
+    if not config.OPENROUTER_API_KEY:
+        raise ValueError(
+            "OPENROUTER_API_KEY не задан. Укажите ключ в .env для AI-подбора xpath."
+        )
+    return OpenAI(
+        api_key=config.OPENROUTER_API_KEY,
+        base_url=config.OPENROUTER_BASE_URL,
+    )
+
+
+def _clean_html(html: str) -> str:
+    """Убрать script, style и HTML-комментарии."""
+    html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
+    html = re.sub(
+        r"<script\b[^>]*>.*?</script>",
+        "",
+        html,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    html = re.sub(
+        r"<style\b[^>]*>.*?</style>",
+        "",
+        html,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    return html
+
+
+def _extract_keywords(notes: str) -> list[str]:
+    keywords: list[str] = []
+    keywords.extend(re.findall(r"«([^»]+)»", notes))
+    keywords.extend(re.findall(r'"([^"]+)"', notes))
+    keywords.extend(re.findall(r"'([^']+)'", notes))
+    for token in re.findall(r"[А-Яа-яA-Za-z0-9]{3,}", notes):
+        if token.lower() not in {"это", "если", "или", "для", "при", "что", "как", "the", "and"}:
+            keywords.append(token)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for kw in keywords:
+        key = kw.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(kw)
+    return unique
+
+
+def _truncate_html(html: str, notes: str, max_chars: int = HTML_MAX_CHARS) -> str:
+    """Обрезать HTML до релевантного фрагмента (~max_chars символов)."""
+    if len(html) <= max_chars:
+        return html
+
+    lowered = html.lower()
+    for keyword in _extract_keywords(notes):
+        idx = lowered.find(keyword.lower())
+        if idx < 0:
+            continue
+        start = max(0, idx - HTML_CONTEXT_RADIUS)
+        end = min(len(html), idx + HTML_CONTEXT_RADIUS)
+        snippet = html[start:end]
+        if len(snippet) > max_chars:
+            center = idx - start
+            half = max_chars // 2
+            snippet = snippet[max(0, center - half) : center - half + max_chars]
+        return snippet
+
+    body_match = re.search(r"<body\b[^>]*>(.*)</body>", html, flags=re.DOTALL | re.IGNORECASE)
+    body = body_match.group(1) if body_match else html
+    return body[:max_chars]
+
+
+def prepare_html_for_ai(page_html: str, notes: str = "") -> str:
+    """Очистить и обрезать HTML перед отправкой в модель."""
+    cleaned = _clean_html(page_html)
+    return _truncate_html(cleaned, notes)
+
+
+def _build_prompt(element_info: dict[str, Any], html: str) -> str:
+    name = element_info.get("name", "")
+    xpath = element_info.get("xpath", element_info.get("old_xpath", ""))
+    notes = element_info.get("notes", "")
+
+    return (
+        f"Ты анализируешь HTML веб-страницы. Дан элемент с именем {name}, "
+        f"старым xpath {xpath} и описанием {notes}, который не найден на странице. "
+        f"Проанализируй предоставленный HTML и найди наиболее вероятный аналогичный элемент. "
+        f"Верни ТОЛЬКО валидный JSON без markdown-разметки: "
+        '{"found": true/false, "new_xpath": "...", "confidence": "high/medium/low", '
+        '"reasoning": "краткое объяснение"}\n\n'
+        f"HTML:\n{html}"
+    )
+
+
+def _strip_markdown_fences(content: str) -> str:
+    content = content.strip()
+    if not content.startswith("```"):
+        return content
+
+    lines = content.splitlines()
+    if lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _parse_model_response(content: str) -> Optional[FallbackResult]:
+    content = _strip_markdown_fences(content)
+
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    found = bool(data.get("found"))
+    new_xpath = data.get("new_xpath", "")
+    confidence = data.get("confidence", "low")
+    reasoning = data.get("reasoning", "")
+
+    if not isinstance(new_xpath, str):
+        new_xpath = ""
+    if not isinstance(confidence, str):
+        confidence = "low"
+    if not isinstance(reasoning, str):
+        reasoning = ""
+
+    return FallbackResult(
+        found=found,
+        new_xpath=new_xpath.strip(),
+        confidence=confidence.strip(),
+        reasoning=reasoning.strip(),
+    )
+
+
+def _log_ai_success(element_name: str, raw_response: str, reasoning: str) -> None:
+    with config.LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"[{_timestamp()}] [AI_OK] {element_name}: reasoning={reasoning}\n")
+        f.write(f"[{_timestamp()}] [AI_RAW] {element_name}: {raw_response}\n")
+
+
+def _log_ai_api_error(element_name: str, exc: Exception) -> None:
+    """Полный текст ошибки API в log.txt для диагностики rate limit и др."""
+    parts = [f"{type(exc).__name__}: {exc}"]
+    if isinstance(exc, APIStatusError):
+        parts.append(f"status_code={exc.status_code}")
+        if exc.body is not None:
+            body = exc.body if isinstance(exc.body, str) else str(exc.body)
+            parts.append(f"body={body}")
+    if hasattr(exc, "response") and exc.response is not None:
+        parts.append(f"response={exc.response}")
+    full_text = " | ".join(parts)
+    with config.LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"[{_timestamp()}] [AI_API_ERROR] {element_name}: {full_text}\n")
+
+
+def _call_openrouter(prompt: str, element_name: str = "unknown") -> str:
+    client = _build_client()
+    last_error: Optional[Exception] = None
+
+    for attempt in range(MAX_API_ATTEMPTS):
+        try:
+            response = client.chat.completions.create(
+                model=config.OPENROUTER_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Ты эксперт по XPath и анализу HTML. Отвечай только JSON.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+            )
+            return response.choices[0].message.content or ""
+        except APIStatusError as exc:
+            last_error = exc
+            _log_ai_api_error(element_name, exc)
+            if exc.status_code == 429 and attempt < MAX_API_ATTEMPTS - 1:
+                time.sleep(RATE_LIMIT_RETRY_DELAY_SEC)
+                continue
+            raise
+        except Exception as exc:
+            last_error = exc
+            _log_ai_api_error(element_name, exc)
+            raise
+
+    if last_error:
+        raise last_error
+    return ""
+
+
+def find_alternative_xpath(
+    element_info: dict[str, Any],
+    page_html: str,
+) -> Optional[FallbackResult]:
+    """
+    Запросить у OpenRouter альтернативный xpath для элемента.
+
+    При found=false или ошибке парсинга пишет [AI_FALLBACK_FAILED] в log.txt
+    и возвращает None.
+    """
+    name = element_info.get("name", "unknown")
+    notes = element_info.get("notes", "")
+
+    try:
+        prepared_html = prepare_html_for_ai(page_html, notes)
+        prompt = _build_prompt(element_info, prepared_html)
+        raw_response = _call_openrouter(prompt, element_name=name)
+    except Exception as exc:
+        _log_ai_fallback_failed(name, f"API request failed: {type(exc).__name__}")
+        return None
+
+    parsed = _parse_model_response(raw_response)
+    if parsed is None:
+        _log_ai_fallback_failed(name, f"JSON parse failed: {raw_response[:300]!r}")
+        return None
+
+    if not parsed.found or not parsed.new_xpath:
+        reason = parsed.reasoning or "model returned found=false"
+        _log_ai_fallback_failed(name, reason)
+        return None
+
+    _log_ai_success(name, raw_response, parsed.reasoning)
+    return parsed
+
+
+def write_successful_xpath(
+    element_name: str,
+    old_xpath: str,
+    new_xpath: str,
+    confidence: str,
+) -> None:
+    """Записать успешный результат в new_xpath.txt."""
+    line = f"{element_name} | {old_xpath} | {new_xpath} | {confidence}"
+    with config.NEW_XPATH_FILE.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def find_and_save_alternative(page: Page, element: dict[str, Any]) -> Optional[str]:
+    """Получить HTML страницы, запросить xpath у AI и сохранить при успехе."""
+    element_info = {
+        "name": element.get("name", ""),
+        "xpath": element.get("xpath", ""),
+        "notes": element.get("notes", ""),
+    }
+    result = find_alternative_xpath(element_info, page.content())
+    if result is None:
+        return None
+
+    old_xpath = element.get("xpath", "")
+    write_successful_xpath(
+        element_name=element_info["name"],
+        old_xpath=old_xpath,
+        new_xpath=result.new_xpath,
+        confidence=result.confidence,
+    )
+
+    if xpath_locator(page, result.new_xpath).count() > 0:
+        element["xpath"] = result.new_xpath
+
+    return result.new_xpath
+====================
+
+=== FILE: ./browser.py ===
+from __future__ import annotations
+
+import json
+import re
+import time
+from dataclasses import dataclass
+from datetime import date
+from typing import Any, Literal, Optional
+
+from playwright.sync_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    Playwright,
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
+)
+
+import config
+from checker import check_element_inline
+
+ResultsBranch = Literal["flights", "empty"]
+
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+_STEALTH_INIT_SCRIPT = (
+    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+)
+
+# Русские названия месяцев в заголовках календаря (род./им. падеж)
+_MONTH_PREFIXES: list[tuple[str, int]] = [
+    ("январ", 1),
+    ("феврал", 2),
+    ("март", 3),
+    ("апрел", 4),
+    ("ма", 5),
+    ("июн", 6),
+    ("июл", 7),
+    ("август", 8),
+    ("сентябр", 9),
+    ("октябр", 10),
+    ("ноябр", 11),
+    ("декабр", 12),
+]
+
+
+def _load_xpaths() -> dict[str, str]:
+    with config.ELEMENTS_FILE.open(encoding="utf-8") as fh:
+        items = json.load(fh)
+    return {item["name"]: item["xpath"] for item in items}
+
+
+_X = _load_xpaths()
+
+X_FROM_INPUT = _X["from_input"]
+X_TO_INPUT = _X["to_input"]
+X_SUGGEST_ITEMS = _X["suggest_items"]
+X_CAL_OPEN = _X["calendar_open_btn"]
+X_CAL_MONTH_SPANS = _X["calendar_month_spans"]
+X_CAL_MONTH_PANEL_BASE = _X["calendar_month_panel_base"]
+X_SEARCH_BTN = _X["search_btn"]
+X_RESULTS_READY = _X["results_ready_indicator"]
+X_NO_FLIGHTS = _X["no_flights_message"]
+X_CLICK_AFTER_RESULTS_1 = _X["click_after_results_1"]
+X_OPEN_RESULT2_PANEL = _X["open_result2_panel"]
+X_CLICK_RESULT2_BUTTON = _X["click_result2_button"]
+X_POPUP_OK_BTN = _X["popup_ok_btn"]
+X_SOMETHING_WENT_WRONG_TITLE = _X["something_went_wrong_title"]
+X_SOMETHING_WENT_WRONG_BOX = _X["something_went_wrong_box"]
+
+X_CAL_CONTAINER = (
+    "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]"
+    "/div/div/div/div[3]/div[2]"
+)
+
+
+@dataclass
+class BrowserHandle:
+    playwright: Playwright
+    browser: Browser
+    context: BrowserContext
+    page: Page
+
+    def close(self) -> None:
+        self.context.close()
+        self.browser.close()
+        self.playwright.stop()
+
+
+@dataclass
+class ErrorState:
+    has_error: bool
+    title_visible: bool
+    box_visible: bool
+
+
+def xpath_locator(page: Page, xpath: str):
+    return page.locator(f"xpath={xpath}")
+
+
+def first_visible_xpath(page: Page, xpath: str):
+    """Первый видимый элемент по xpath (на сайте бывают скрытые дубликаты в DOM)."""
+    locator = xpath_locator(page, xpath)
+    count = locator.count()
+    for index in range(count):
+        candidate = locator.nth(index)
+        try:
+            if candidate.is_visible():
+                return candidate
+        except Exception:
+            continue
+    return locator.first
+
+from checker import check_element_inline, log_event  # добавьте log_event в этот импорт
+
+
+def _click_locator_with_retry(
+    page: Page,
+    locator,
+    *,
+    label: str,
+    attempts: int = 3,
+    wait_ms: int = 2500,
+    initial_wait_ms: int = 60000,
+) -> None:
+    """Дождаться появления элемента (может грузиться с задержкой), затем кликнуть с retry."""
+    try:
+        locator.first.wait_for(state="attached", timeout=initial_wait_ms)
+    except Exception as exc:
+        log_event(f"{label}: элемент не появился за {initial_wait_ms}ms — {exc}")
+        raise
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            locator.first.scroll_into_view_if_needed(timeout=10000)
+            locator.first.wait_for(state="visible", timeout=10000)
+            locator.first.click(timeout=10000)
+            return
+        except Exception as exc:
+            last_exc = exc
+            log_event(f"{label}: попытка {attempt}/{attempts} не удалась — {exc}")
+            _pause(page, wait_ms)
+    if last_exc:
+        raise last_exc
+
+def _pause(page: Page, ms: int = 500) -> None:
+    page.wait_for_timeout(ms)
+
+
+def _wait_search_form_ready(page: Page) -> None:
+    """Дождаться видимой формы поиска и прокрутить к ней."""
+    deadline = time.monotonic() + config.NAVIGATION_TIMEOUT / 1000
+    last_error: Optional[Exception] = None
+
+    while time.monotonic() < deadline:
+        accept_cookies(page)
+        check_and_close_popup(page)
+        for placeholder_text in ("Откуда", "Куда", "Туда"):
+            try:
+                placeholder = page.get_by_placeholder(placeholder_text, exact=False)
+                for index in range(placeholder.count()):
+                    candidate = placeholder.nth(index)
+                    if candidate.is_visible():
+                        candidate.scroll_into_view_if_needed()
+                        _pause(page, 500)
+                        return
+            except Exception as exc:
+                last_error = exc
+
+        for field_xpath in (X_FROM_INPUT, X_TO_INPUT, X_CAL_OPEN):
+            try:
+                locator = xpath_locator(page, field_xpath)
+                for index in range(locator.count()):
+                    candidate = locator.nth(index)
+                    try:
+                        if candidate.is_visible():
+                            candidate.scroll_into_view_if_needed()
+                            _pause(page, 500)
+                            return
+                    except Exception as exc:
+                        last_error = exc
+            except Exception as exc:
+                last_error = exc
+
+        for label in ("Найти", "Поиск билетов"):
+            try:
+                marker = page.get_by_role("button", name=label) if label == "Найти" else page.get_by_text(label, exact=False)
+                for index in range(marker.count()):
+                    candidate = marker.nth(index)
+                    if candidate.is_visible():
+                        candidate.scroll_into_view_if_needed()
+                        _pause(page, 500)
+                        return
+            except Exception as exc:
+                last_error = exc
+
+        try:
+            page.evaluate("window.scrollTo(0, 0)")
+        except Exception as exc:
+            last_error = exc
+        _pause(page, 1500)
+
+    raise RuntimeError(f"Форма поиска не появилась: {last_error}")
+
+
+def launch_browser(headless: bool = False) -> BrowserHandle:
+    """Запуск Playwright Chromium с настройками для aeroflot.ru."""
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(
+        headless=headless,
+        args=["--disable-blink-features=AutomationControlled"],
+    )
+    context = browser.new_context(
+        locale="ru-RU",
+        timezone_id="Europe/Moscow",
+        viewport={"width": 1920, "height": 1080},
+        user_agent=_USER_AGENT,
+        extra_http_headers={"Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"},
+    )
+    context.add_init_script(_STEALTH_INIT_SCRIPT)
+    page = context.new_page()
+    page.set_default_timeout(config.BROWSER_TIMEOUT)
+
+    last_error: Optional[Exception] = None
+    for attempt in range(3):
+        try:
+            page.goto(
+                config.BASE_URL,
+                wait_until="load",
+                timeout=config.NAVIGATION_TIMEOUT,
+            )
+            _pause(page, 5000 + attempt * 2000)
+            accept_cookies(page)
+            _pause(page, 1000)
+            accept_cookies(page)
+            check_and_close_popup(page)
+            _wait_search_form_ready(page)
+            return BrowserHandle(
+                playwright=playwright,
+                browser=browser,
+                context=context,
+                page=page,
+            )
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                _pause(page, 2000)
+
+    browser.close()
+    playwright.stop()
+    raise RuntimeError(f"Не удалось открыть страницу Aeroflot: {last_error}")
+
+
+def accept_cookies(page: Page) -> bool:
+    """Закрыть баннер cookie/согласия при первом заходе, если он виден."""
+    selectors = [
+        "button:has-text('Принять')",
+        "button:has-text('Принять все')",
+        "button:has-text('Согласен')",
+        "button:has-text('Согласиться')",
+        "button:has-text('Accept')",
+        "button:has-text('Хорошо')",
+        "button:has-text('Accept all')",
+        "[data-testid='cookie-accept']",
+        "[class*='cookie'] button:has-text('Принять')",
+        "[class*='Cookie'] button:has-text('Принять')",
+        "[class*='consent'] button",
+    ]
+    for sel in selectors:
+        btn = page.locator(sel)
+        if btn.count() == 0:
+            continue
+        try:
+            candidate = btn.first
+            if candidate.is_visible(timeout=1500):
+                candidate.click()
+                _pause(page, 800)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def check_and_close_popup(page: Page) -> bool:
+    """Проверить X_POPUP_OK_BTN и закрыть, если виден."""
+    closed = accept_cookies(page)
+
+    popup = xpath_locator(page, X_POPUP_OK_BTN)
+    if popup.count() > 0 and popup.first.is_visible():
+        popup.first.click()
+        _pause(page, 500)
+        closed = True
+    return closed
+
+
+def check_error_state(page: Page) -> ErrorState:
+    """Проверить блок ошибки «Что-то пошло не так»."""
+    title = xpath_locator(page, X_SOMETHING_WENT_WRONG_TITLE)
+    box = xpath_locator(page, X_SOMETHING_WENT_WRONG_BOX)
+    title_visible = title.count() > 0 and title.first.is_visible()
+    box_visible = box.count() > 0 and box.first.is_visible()
+    # box-xpath слишком общий и даёт ложные срабатывания — ошибка только при видимом заголовке
+    return ErrorState(
+        has_error=title_visible,
+        title_visible=title_visible,
+        box_visible=box_visible,
+    )
+
+
+def _fill_city_field(
+    page: Page,
+    input_xpath: str,
+    city_name: str,
+    *,
+    suggest_element: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    _wait_search_form_ready(page)
+    field = first_visible_xpath(page, input_xpath)
+    field.scroll_into_view_if_needed()
+    field.click()
+    field.fill("")
+    field.type(city_name, delay=70)
+    _pause(page, 1200)
+
+    missing: Optional[dict[str, Any]] = None
+    if suggest_element is not None:
+        missing = check_dropdown_visible(page, suggest_element)
+
+    suggestions = xpath_locator(page, X_SUGGEST_ITEMS)
+    suggestions.first.wait_for(state="visible", timeout=config.BROWSER_TIMEOUT)
+
+    matched = suggestions.filter(has_text=city_name.split()[0])
+    if matched.count() > 0:
+        matched.first.click()
+    else:
+        suggestions.first.click()
+    _pause(page, 500)
+    return missing
+
+
+def check_dropdown_visible(page: Page, suggest_element: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Проверить видимость дропдауна подсказок до выбора города."""
+    return check_element_inline(page, suggest_element, require_visible=True)
+
+
+def fill_from_input(
+    page: Page,
+    city_name: str,
+    suggest_element: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    """Заполнить «Откуда», проверить дропдаун, выбрать подсказку."""
+    return _fill_city_field(
+        page,
+        X_FROM_INPUT,
+        city_name,
+        suggest_element=suggest_element,
+    )
+
+
+def fill_to_input(page: Page, city_name: str) -> None:
+    """Заполнить «Куда» и выбрать подсказку из дропдауна."""
+    _fill_city_field(page, X_TO_INPUT, city_name)
+
+
+def open_calendar(page: Page) -> None:
+    """Клик по полю даты (X_CAL_OPEN) для открытия календаря."""
+    field = first_visible_xpath(page, X_CAL_OPEN)
+    field.scroll_into_view_if_needed()
+    field.click()
+    _pause(page, 1000)
+    xpath_locator(page, X_CAL_MONTH_SPANS).first.wait_for(
+        state="visible",
+        timeout=config.BROWSER_TIMEOUT,
+    )
+
+
+def _parse_month_header(text: str, reference: date) -> tuple[int, int]:
+    lowered = text.lower().strip()
+    year_match = re.search(r"(20\d{2})", lowered)
+    year = int(year_match.group(1)) if year_match else reference.year
+
+    month_num: Optional[int] = None
+    for prefix, num in _MONTH_PREFIXES:
+        if prefix in lowered:
+            month_num = num
+            break
+    if month_num is None:
+        raise ValueError(f"Не удалось распознать месяц в заголовке: {text!r}")
+
+    if year_match is None and month_num < reference.month:
+        year += 1
+    return month_num, year
+
+
+def _read_visible_months(page: Page, reference: date) -> list[tuple[int, int, int]]:
+    """
+    Прочитать видимые месяцы календаря.
+    Возвращает список (column_index, month, year).
+    column_index — индекс среди X_CAL_MONTH_SPANS (0..9).
+    """
+    headers = xpath_locator(page, X_CAL_MONTH_SPANS)
+    count = headers.count()
+    result: list[tuple[int, int, int]] = []
+    for idx in range(count):
+        text = headers.nth(idx).inner_text().strip()
+        if not text:
+            continue
+        month, year = _parse_month_header(text, reference)
+        result.append((idx, month, year))
+    return result
+
+
+def _scroll_calendar(page: Page, direction: Literal["prev", "next"]) -> None:
+    """
+    Прокрутка ленты месяцев.
+    Пустые кнопки cTamTk в контейнере календаря — стрелки «назад/вперёд».
+    """
+    nav_xpath = (
+        f"{X_CAL_CONTAINER}//button[contains(@class,'cTamTk') "
+        f"and normalize-space(.)='']"
+    )
+    buttons = xpath_locator(page, nav_xpath)
+    if buttons.count() < 2:
+        raise RuntimeError("Кнопки навигации календаря не найдены")
+
+    index = 0 if direction == "prev" else 1
+    buttons.nth(index).click()
+    _pause(page, 700)
+
+
+def _ensure_month_visible(page: Page, target: date) -> int:
+    """
+    Дождаться появления целевого месяца среди видимых колонок.
+    Возвращает column_index (0-based среди X_CAL_MONTH_SPANS).
+    """
+    for _ in range(24):
+        visible = _read_visible_months(page, target)
+        for col_idx, month, year in visible:
+            if month == target.month and year == target.year:
+                return col_idx
+
+        if not visible:
+            raise RuntimeError("Календарь открыт, но заголовки месяцев не найдены")
+
+        first = visible[0]
+        last = visible[-1]
+        first_key = first[2] * 12 + first[1]
+        last_key = last[2] * 12 + last[1]
+        target_key = target.year * 12 + target.month
+
+        if target_key < first_key:
+            _scroll_calendar(page, "prev")
+        elif target_key > last_key:
+            _scroll_calendar(page, "next")
+        else:
+            raise RuntimeError(
+                f"Месяц {target.month:02d}.{target.year} не найден среди колонок календаря"
+            )
+
+    raise RuntimeError(
+        f"Не удалось прокрутить календарь к {target.isoformat()} за 24 шага"
+    )
+
+
+def _click_day_in_month_column(page: Page, column_index: int, day: int) -> None:
+    """
+    Выбрать день в колонке месяца.
+
+    X_CAL_MONTH_PANEL_BASE совпадает с несколькими div:
+      [1] — строка дней недели (Пн..Вс),
+      [2..11] — колонки месяцев с кнопками-днями (текст вида «9\\n5 640 ₽»).
+    column_index из X_CAL_MONTH_SPANS (0..9) → xpath-индекс panel = column_index + 2.
+    """
+    clicked = page.evaluate(
+        """({panelBase, colIdx, dayNum}) => {
+            const panelXpath = `(${panelBase})[${colIdx + 2}]`;
+            const panel = document.evaluate(
+                panelXpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+            ).singleNodeValue;
+            if (!panel) return false;
+            for (const btn of panel.querySelectorAll('button')) {
+                if (btn.className.includes('cTamTk')) continue;
+                const label = (btn.innerText || '').split('\\n')[0].trim();
+                if (label === String(dayNum)) {
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
+        }""",
+        {"panelBase": X_CAL_MONTH_PANEL_BASE, "colIdx": column_index, "dayNum": day},
+    )
+    if not clicked:
+        raise RuntimeError(
+            f"День {day} не найден в колонке месяца {column_index}"
+        )
+    _pause(page, 600)
+
+
+def select_date(page: Page, target_date: date) -> date:
+    """
+    Выбрать дату в открытом календаре.
+
+    1. Найти колонку месяца по заголовкам X_CAL_MONTH_SPANS.
+    2. При необходимости прокрутить ленту месяцев стрелками.
+    3. Кликнуть кнопку дня внутри X_CAL_MONTH_PANEL_BASE[column].
+    """
+    if xpath_locator(page, X_CAL_MONTH_SPANS).count() == 0:
+        open_calendar(page)
+
+    column_index = _ensure_month_visible(page, target_date)
+    _click_day_in_month_column(page, column_index, target_date.day)
+
+    expected_fragment = str(target_date.day)
+    deadline = page.evaluate("() => Date.now()") + config.BROWSER_TIMEOUT
+    while page.evaluate("() => Date.now()") < deadline:
+        value = xpath_locator(page, X_CAL_OPEN).input_value()
+        if expected_fragment in value:
+            return target_date
+        _pause(page, 200)
+
+    return target_date
+
+
+def click_search(page: Page) -> None:
+    """Клик по кнопке «Поиск»."""
+    btn = first_visible_xpath(page, X_SEARCH_BTN)
+    btn.scroll_into_view_if_needed()
+    btn.click()
+    _pause(page, 2500)
+
+
+def wait_results_ready(page: Page, timeout: int = 60000) -> ResultsBranch:
+    """
+    Дождаться X_RESULTS_READY или X_NO_FLIGHTS.
+    Возвращает 'flights' или 'empty'.
+    """
+    deadline = time.monotonic() + timeout / 1000
+
+    while time.monotonic() < deadline:
+        results = xpath_locator(page, X_RESULTS_READY)
+        for index in range(results.count()):
+            try:
+                if results.nth(index).is_visible():
+                    return "flights"
+            except Exception:
+                continue
+
+        no_flights = xpath_locator(page, X_NO_FLIGHTS)
+        if no_flights.count() > 0 and no_flights.first.is_visible():
+            return "empty"
+
+        _pause(page, 800)
+
+    raise TimeoutError("Результаты поиска не загрузились в отведённое время")
+
+
+def reload_results_page(page: Page, timeout: int = 60000) -> ResultsBranch:
+    """Перезагрузить страницу результатов и дождаться готовности."""
+    last_error: Optional[Exception] = None
+
+    for attempt in range(2):
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=min(timeout, 45000))
+        except PlaywrightTimeoutError:
+            pass
+        accept_cookies(page)
+        check_and_close_popup(page)
+        _pause(page, 3000 + attempt * 2000)
+        try:
+            return wait_results_ready(page, timeout=timeout)
+        except TimeoutError as exc:
+            last_error = exc
+
+    raise TimeoutError(
+        str(last_error) if last_error else "Результаты поиска не загрузились в отведённое время"
+    )
+
+
+def click_after_results_1(page: Page) -> None:
+    """Клик по первому результату (ветка results_flow_1)."""
+    locator = xpath_locator(page, X_CLICK_AFTER_RESULTS_1)
+    _click_locator_with_retry(page, locator, label="click_after_results_1")
+    _pause(page, 1500)
+
+
+def open_result2_panel(page: Page) -> None:
+    """Открыть панель тарифов (ветка results_flow_2)."""
+    locator = xpath_locator(page, X_OPEN_RESULT2_PANEL)
+    _click_locator_with_retry(page, locator, label="open_result2_panel")
+    _pause(page, 1500)
+
+
+def click_result2_button(page: Page) -> None:
+    """Клик для раскрытия деталей (ветка results_flow_2)."""
+    locator = xpath_locator(page, X_CLICK_RESULT2_BUTTON)
+    _click_locator_with_retry(page, locator, label="click_result2_button")
+    _pause(page, 1500)====================
+
+=== FILE: ./checker.py ===
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Optional
+
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
+
+import config
+
+CHECK_TIMEOUT_MS = 5000
+
+ALT_FLOW_STAGES = frozenset({"results_flow_1", "results_flow_2"})
+
+
+@dataclass
+class StageCheckResult:
+    missing: list[dict[str, Any]] = field(default_factory=list)
+    ok_count: int = 0
+    skipped_count: int = 0
+
+
+def load_elements() -> list[dict[str, Any]]:
+    with config.ELEMENTS_FILE.open(encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_elements_by_stage(elements: list[dict[str, Any]], stage: str) -> list[dict[str, Any]]:
+    return [el for el in elements if el.get("stage") == stage]
+
+
+def get_element_by_name(elements: list[dict[str, Any]], name: str) -> Optional[dict[str, Any]]:
+    for el in elements:
+        if el.get("name") == name:
+            return el
+    return None
+
+
+def _timestamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _write_log_line(line: str) -> None:
+    with config.LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def log_event(message: str) -> None:
+    """Служебная запись в log.txt (запуск, ошибки, попапы и т.д.)."""
+    _write_log_line(f"[{_timestamp()}] [EVENT] {message}")
+
+
+def _log_check_result(status: str, name: str, xpath: str) -> None:
+    _write_log_line(f"[{_timestamp()}] [{status}] {name}: {xpath}")
+
+
+def _is_action_ready(element: dict[str, Any], completed_actions: set[str]) -> bool:
+    action_before = element.get("action_before")
+    if not action_before:
+        return True
+    return action_before in completed_actions
+
+
+def _is_optional(element: dict[str, Any]) -> bool:
+    return bool(element.get("optional"))
+
+
+def _element_on_page(page: Page, xpath: str, timeout_ms: int = CHECK_TIMEOUT_MS) -> bool:
+    locator = page.locator(f"xpath={xpath}")
+    try:
+        locator.first.wait_for(state="attached", timeout=timeout_ms)
+        return locator.count() > 0
+    except PlaywrightTimeoutError:
+        return False
+
+
+def _element_visible(page: Page, xpath: str, timeout_ms: int = CHECK_TIMEOUT_MS) -> bool:
+    locator = page.locator(f"xpath={xpath}")
+    try:
+        locator.first.wait_for(state="visible", timeout=timeout_ms)
+        return locator.count() > 0 and locator.first.is_visible()
+    except PlaywrightTimeoutError:
+        return False
+
+
+def _eligible_elements(
+    elements: list[dict[str, Any]],
+    stage: str,
+    completed_actions: set[str],
+) -> list[dict[str, Any]]:
+    return [
+        el
+        for el in elements
+        if el.get("stage") == stage
+        and not el.get("inline_only")
+        and _is_action_ready(el, completed_actions)
+    ]
+
+
+def _global_error_element_found(
+    page: Page,
+    element: dict[str, Any],
+    elements: list[dict[str, Any]],
+) -> bool:
+    """Для global_error: box считается найденным только вместе с видимым заголовком."""
+    name = element.get("name", "")
+    xpath = element.get("xpath", "")
+    if name == "something_went_wrong_box":
+        title = get_element_by_name(elements, "something_went_wrong_title")
+        if title is None:
+            return _element_visible(page, xpath)
+        title_visible = _element_visible(page, title.get("xpath", ""), timeout_ms=2000)
+        if not title_visible:
+            return False
+        return _element_visible(page, xpath)
+    return _element_visible(page, xpath)
+
+
+def _evaluate_element(
+    page: Page,
+    element: dict[str, Any],
+    *,
+    require_visible: bool = False,
+    elements: Optional[list[dict[str, Any]]] = None,
+) -> tuple[bool, bool]:
+    """
+    Проверить один элемент.
+    Возвращает (found, optional_absent_ok).
+    optional_absent_ok=True — опциональный элемент отсутствует (считается OK).
+    """
+    xpath = element.get("xpath", "")
+    if require_visible and element.get("stage") == "global_error" and elements is not None:
+        found = _global_error_element_found(page, element, elements)
+    else:
+        found = (
+            _element_visible(page, xpath)
+            if require_visible
+            else _element_on_page(page, xpath)
+        )
+    if found:
+        return True, False
+    if _is_optional(element):
+        return False, True
+    return False, False
+
+
+def check_branch_inactive_element(page: Page, element: dict[str, Any]) -> None:
+    """Залогировать элемент альтернативной ветки результатов, не активной в этом прогоне."""
+    name = element.get("name", "")
+    xpath = element.get("xpath", "")
+    _log_check_result("OK - not present, branch inactive", name, xpath)
+
+
+def check_element_inline(
+    page: Page,
+    element: dict[str, Any],
+    *,
+    require_visible: bool = True,
+) -> Optional[dict[str, Any]]:
+    """
+    Проверить элемент в конкретный момент сценария (вне check_elements по stage).
+    Возвращает element dict только если элемент обязателен и не найден.
+    """
+    name = element.get("name", "")
+    xpath = element.get("xpath", "")
+    found, optional_absent = _evaluate_element(
+        page, element, require_visible=require_visible, elements=None
+    )
+
+    if found:
+        _log_check_result("OK", name, xpath)
+        return None
+    if optional_absent:
+        _log_check_result("OK - not present, optional", name, xpath)
+        return None
+
+    _log_check_result("MISSING", name, xpath)
+    return element
+
+
+def _opposite_alt_flow(stage: str) -> Optional[str]:
+    if stage == "results_flow_1":
+        return "results_flow_2"
+    if stage == "results_flow_2":
+        return "results_flow_1"
+    return None
+
+
+def _is_opposite_flow_active(
+    page: Page,
+    elements: list[dict[str, Any]],
+    stage: str,
+    completed_actions: set[str],
+) -> bool:
+    """Пропуск alt-flow только если противоположная ветка уже была выполнена на этой странице."""
+    opposite = _opposite_alt_flow(stage)
+    if opposite is None:
+        return False
+
+    opposite_entry_actions = {
+        "results_flow_1": "click_after_results_1",
+        "results_flow_2": "open_result2_panel",
+    }
+    entry_action = opposite_entry_actions.get(opposite)
+    if not entry_action or entry_action not in completed_actions:
+        return False
+
+    for el in _eligible_elements(elements, opposite, completed_actions):
+        if _element_on_page(page, el.get("xpath", ""), timeout_ms=CHECK_TIMEOUT_MS):
+            return True
+    return False
+
+
+def check_elements(
+    page: Page,
+    elements: list[dict[str, Any]],
+    current_stage: str,
+    completed_actions: Optional[set[str]] = None,
+) -> StageCheckResult:
+    """
+    Проверить элементы текущего stage с учётом action_before.
+
+    - Пропускает элементы, чей action_before ещё не выполнен.
+    - Логирует [OK] / [MISSING] / [SKIPPED - alt flow active] в log.txt.
+    - Возвращает missing элементы (без SKIPPED) и счётчики ok/skipped.
+    """
+    actions = completed_actions if completed_actions is not None else set()
+    to_check = _eligible_elements(elements, current_stage, actions)
+    missing: list[dict[str, Any]] = []
+    ok_count = 0
+    skipped_count = 0
+
+    opposite_active = (
+        _is_opposite_flow_active(page, elements, current_stage, actions)
+        if current_stage in ALT_FLOW_STAGES
+        else False
+    )
+
+    for element in to_check:
+        name = element.get("name", "")
+        xpath = element.get("xpath", "")
+
+        found, optional_absent = _evaluate_element(
+            page,
+            element,
+            require_visible=_is_optional(element),
+            elements=elements if current_stage == "global_error" else None,
+        )
+        if found:
+            _log_check_result("OK", name, xpath)
+            ok_count += 1
+            continue
+        if optional_absent:
+            _log_check_result("OK - not present, optional", name, xpath)
+            ok_count += 1
+            continue
+
+        if current_stage in ALT_FLOW_STAGES and opposite_active:
+            _log_check_result("SKIPPED - alt flow active", name, xpath)
+            skipped_count += 1
+            continue
+
+        _log_check_result("MISSING", name, xpath)
+        missing.append(element)
+
+    return StageCheckResult(missing=missing, ok_count=ok_count, skipped_count=skipped_count)
+
+
+class ElementChecker:
+    """Обёртка над check_elements с отслеживанием выполненных action_before."""
+
+    def __init__(self, elements: list[dict[str, Any]]) -> None:
+        self.elements = elements
+        self.completed_actions: set[str] = set()
+
+    def mark_action(self, action: str) -> None:
+        self.completed_actions.add(action)
+
+    def check_stage(self, page: Page, stage: str) -> StageCheckResult:
+        """Проверить stage и вернуть результат с missing элементами."""
+        return check_elements(page, self.elements, stage, self.completed_actions)
+
+    def element_exists(self, page: Page, xpath: str, *, visible: bool = False) -> bool:
+        locator = page.locator(f"xpath={xpath}")
+        if locator.count() == 0:
+            return False
+        if visible:
+            return locator.first.is_visible()
+        return True
+
+    def require(self, page: Page, name: str, *, visible: bool = False) -> bool:
+        element = get_element_by_name(self.elements, name)
+        if element is None:
+            raise KeyError(f"Элемент '{name}' не описан в elements.json")
+        if visible:
+            locator = page.locator(f"xpath={element['xpath']}")
+            return locator.count() > 0 and locator.first.is_visible()
+        return _element_on_page(page, element["xpath"])
+====================
+
+=== FILE: ./config.py ===
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BASE_DIR = Path(__file__).resolve().parent
+
+ELEMENTS_FILE = BASE_DIR / "elements.json"
+LOG_FILE = BASE_DIR / "log.txt"
+NEW_XPATH_FILE = BASE_DIR / "new_xpath.txt"
+
+BASE_URL = os.getenv("AEROFLOT_URL", "https://www.aeroflot.ru/ru-ru/")
+FROM_CITY = os.getenv("FROM_CITY", "Москва")
+TO_CITY = os.getenv("TO_CITY", "Санкт-Петербург")
+DAYS_AHEAD = int(os.getenv("DAYS_AHEAD", "7"))
+
+HEADLESS = os.getenv("HEADLESS", "true").lower() in ("1", "true", "yes")
+BROWSER_TIMEOUT = int(os.getenv("BROWSER_TIMEOUT", "30000"))
+NAVIGATION_TIMEOUT = int(os.getenv("NAVIGATION_TIMEOUT", "60000"))
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
+
+AI_HTML_MAX_CHARS = int(os.getenv("AI_HTML_MAX_CHARS", "15000"))
+====================
+
+=== FILE: ./main.py ===
+"""
+Сценарий поиска авиабилетов на aeroflot.ru с проверкой xpath на каждом этапе.
+"""
+
+from __future__ import annotations
+
+import argparse
+import random
+import sys
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from typing import Any, Optional
+
+import config
+from ai_fallback import find_alternative_xpath, write_successful_xpath
+from browser import (
+    accept_cookies,
+    check_and_close_popup,
+    check_error_state,
+    click_after_results_1,
+    click_result2_button,
+    click_search,
+    fill_from_input,
+    fill_to_input,
+    launch_browser,
+    open_calendar,
+    open_result2_panel,
+    reload_results_page,
+    select_date,
+    wait_results_ready,
+)
+from checker import (
+    check_branch_inactive_element,
+    check_element_inline,
+    check_elements,
+    get_element_by_name,
+    load_elements,
+    log_event,
+)
+from playwright.sync_api import Page
+
+FLOW_ACTIONS = frozenset({
+    "open_result2_panel",
+    "click_result2_button",
+    "click_after_results_1",
+})
+
+
+@dataclass
+class RunSummary:
+    ok: int = 0
+    missing: int = 0
+    skipped: int = 0
+    ai_resolved: int = 0
+    all_missing: list[dict[str, Any]] = field(default_factory=list)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Парсер xpath-элементов Aeroflot")
+    parser.add_argument(
+        "--headless",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Запуск браузера без UI (по умолчанию False для отладки)",
+    )
+    parser.add_argument(
+        "--force-test-ai",
+        action="store_true",
+        help=(
+            "После обычного прогона искусственно пометить один случайный OK-элемент "
+            "как missing и прогнать через AI fallback (для проверки OpenRouter)"
+        ),
+    )
+    return parser.parse_args()
+
+
+def _safety_checks(page: Page) -> bool:
+    """Попапы и ошибки между шагами. Возвращает True, если страница в ошибке."""
+    accept_cookies(page)
+    check_and_close_popup(page)
+    error = check_error_state(page)
+    if error.has_error:
+        log_event(
+            f"Обнаружена ошибка на странице: "
+            f"title={error.title_visible}, box={error.box_visible}"
+        )
+        return True
+    return False
+
+
+def _check_stage(
+    page: Page,
+    elements: list[dict[str, Any]],
+    stage: str,
+    completed_actions: set[str],
+    summary: RunSummary,
+) -> None:
+    result = check_elements(page, elements, stage, completed_actions)
+    summary.ok += result.ok_count
+    summary.skipped += result.skipped_count
+    summary.all_missing.extend(result.missing)
+
+
+def _record_inline_check(
+    summary: RunSummary,
+    missing: Optional[dict[str, Any]],
+) -> None:
+    if missing is not None:
+        summary.all_missing.append(missing)
+    else:
+        summary.ok += 1
+
+
+def _dedupe_missing(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for element in elements:
+        name = element.get("name", "")
+        if name in seen:
+            continue
+        seen.add(name)
+        unique.append(element)
+    return unique
+
+
+def _reset_flow_actions(completed_actions: set[str]) -> None:
+    completed_actions.difference_update(FLOW_ACTIONS)
+
+
+def _run_flow_2(
+    page: Page,
+    elements: list[dict[str, Any]],
+    completed_actions: set[str],
+    summary: RunSummary,
+) -> None:
+    print("\n[results_flow_2]")
+    _safety_checks(page)
+
+    try:
+        open_result2_panel(page)
+    except Exception as exc:
+        log_event(f"results_flow_2: open_result2_panel не выполнен — {exc}")
+
+    try:
+        click_result2_button(page)
+    except Exception as exc:
+        log_event(f"results_flow_2: click_result2_button не выполнен — {exc}")
+
+    completed_actions.update({"open_result2_panel", "click_result2_button"})
+    _safety_checks(page)
+    _check_stage(page, elements, "results_flow_2", completed_actions, summary)
+
+
+def _run_flow_1(
+    page: Page,
+    elements: list[dict[str, Any]],
+    completed_actions: set[str],
+    summary: RunSummary,
+) -> None:
+    print("\n[results_flow_1]")
+    _safety_checks(page)
+
+    try:
+        click_after_results_1(page)
+    except Exception as exc:
+        log_event(f"results_flow_1: click_after_results_1 не выполнен — {exc}")
+
+    completed_actions.add("click_after_results_1")
+    _safety_checks(page)
+    _check_stage(page, elements, "results_flow_1", completed_actions, summary)
+
+
+def _run_ai_fallback(
+    page: Page,
+    missing_elements: list[dict[str, Any]],
+    summary: RunSummary,
+) -> None:
+    seen: set[str] = set()
+    for element in missing_elements:
+        if element.get("optional"):
+            continue
+        name = element.get("name", "")
+        if name in seen:
+            continue
+        seen.add(name)
+
+        element_info = {
+            "name": name,
+            "xpath": element.get("xpath", ""),
+            "notes": element.get("notes", ""),
+        }
+        page_html = page.content()
+        result = find_alternative_xpath(element_info, page_html)
+        if result is None:
+            continue
+
+        write_successful_xpath(
+            element_name=name,
+            old_xpath=element_info["xpath"],
+            new_xpath=result.new_xpath,
+            confidence=result.confidence,
+        )
+        summary.ai_resolved += 1
+
+
+def _run_force_test_ai(
+    page: Page,
+    elements: list[dict[str, Any]],
+    summary: RunSummary,
+) -> None:
+    """Искусственно отправить один случайный обязательный элемент в AI fallback."""
+    candidates = [
+        el for el in elements
+        if not el.get("optional") and not el.get("inline_only")
+    ]
+    if not candidates:
+        log_event("force-test-ai: нет подходящих элементов для теста")
+        print("\n[force-test-ai] Нет подходящих элементов для теста")
+        return
+
+    picked = random.choice(candidates)
+    name = picked.get("name", "")
+    log_event(f"force-test-ai: искусственно помечен как MISSING: {name}")
+    print(f"\n[force-test-ai] Тест AI fallback для элемента: {name}")
+
+    before_resolved = summary.ai_resolved
+    _run_ai_fallback(page, [picked], summary)
+
+    if summary.ai_resolved > before_resolved:
+        log_event(f"force-test-ai: AI fallback успешен для {name}")
+        print(f"[force-test-ai] AI fallback успешен для {name}")
+    else:
+        log_event(f"force-test-ai: AI fallback не дал xpath для {name}")
+        print(f"[force-test-ai] AI fallback не дал xpath для {name}")
+        summary.all_missing.append(picked)
+
+
+def _print_summary(summary: RunSummary) -> None:
+    summary.all_missing = _dedupe_missing(summary.all_missing)
+    summary.missing = len(summary.all_missing)
+    print("\n" + "=" * 50)
+    print("SUMMARY")
+    print("=" * 50)
+    print(f"  OK:                 {summary.ok}")
+    print(f"  MISSING:            {summary.missing}")
+    print(f"  SKIPPED (alt flow): {summary.skipped}")
+    print(f"  AI resolved:        {summary.ai_resolved}")
+    print("=" * 50)
+    print(f"  Лог:         {config.LOG_FILE}")
+    print(f"  Новые xpath: {config.NEW_XPATH_FILE}")
+
+
+def run_scenario(headless: bool = False, force_test_ai: bool = False) -> int:
+    elements = load_elements()
+    completed_actions: set[str] = set()
+    summary = RunSummary()
+
+    config.LOG_FILE.write_text("", encoding="utf-8")
+    if force_test_ai:
+        config.NEW_XPATH_FILE.write_text("", encoding="utf-8")
+    log_event(
+        f"Запуск сценария: {config.FROM_CITY} → {config.TO_CITY}, "
+        f"headless={headless}, force_test_ai={force_test_ai}"
+    )
+    print(f"Открываем {config.BASE_URL} (headless={headless})")
+
+    session = launch_browser(headless=headless)
+    page = session.page
+
+    try:
+        if _safety_checks(page):
+            _check_stage(page, elements, "global_error", completed_actions, summary)
+            _run_ai_fallback(page, summary.all_missing, summary)
+            _print_summary(summary)
+            return 1
+
+        _check_stage(page, elements, "global_popup", completed_actions, summary)
+        _check_stage(page, elements, "global_error", completed_actions, summary)
+        _safety_checks(page)
+
+        print("\n[search_form]")
+        _check_stage(page, elements, "search_form", completed_actions, summary)
+        _safety_checks(page)
+
+        print(f"  Заполняем «Откуда»: {config.FROM_CITY}")
+        suggest_el = get_element_by_name(elements, "suggest_items")
+        inline_missing = fill_from_input(page, config.FROM_CITY, suggest_el)
+        _record_inline_check(summary, inline_missing)
+        completed_actions.add("fill_from_input")
+        _safety_checks(page)
+
+        print(f"  Заполняем «Куда»: {config.TO_CITY}")
+        fill_to_input(page, config.TO_CITY)
+        completed_actions.add("fill_to_input")
+        _safety_checks(page)
+
+        print("\n[calendar]")
+        open_calendar(page)
+        completed_actions.add("open_calendar")
+        _safety_checks(page)
+        _check_stage(page, elements, "calendar", completed_actions, summary)
+
+        target = date.today() + timedelta(days=config.DAYS_AHEAD)
+        print(f"  Выбираем дату: {target.isoformat()}")
+        select_date(page, target)
+        completed_actions.add("select_date")
+        _safety_checks(page)
+
+        search_btn_el = get_element_by_name(elements, "search_btn")
+        if search_btn_el:
+            _record_inline_check(
+                summary,
+                check_element_inline(page, search_btn_el, require_visible=True),
+            )
+
+        print("\n[click_search]")
+        _safety_checks(page)
+        click_search(page)
+        completed_actions.add("click_search")
+        _safety_checks(page)
+
+        print("\n[results_branch]")
+        branch = wait_results_ready(page, timeout=config.NAVIGATION_TIMEOUT)
+        completed_actions.add("wait_results_ready")
+        _safety_checks(page)
+
+        no_flights_el = get_element_by_name(elements, "no_flights_message")
+        if branch == "empty":
+            print("  Ветка: рейсов нет")
+            _check_stage(page, elements, "results_branch_empty", completed_actions, summary)
+            results_ready_el = get_element_by_name(elements, "results_ready_indicator")
+            if results_ready_el:
+                check_branch_inactive_element(page, results_ready_el)
+                summary.ok += 1
+        else:
+            print("  Ветка: рейсы найдены")
+            _check_stage(page, elements, "results_branch_flights", completed_actions, summary)
+            if no_flights_el:
+                check_branch_inactive_element(page, no_flights_el)
+                summary.ok += 1
+
+            _run_flow_2(page, elements, completed_actions, summary)
+
+            _reset_flow_actions(completed_actions)
+            reload_results_page(page, timeout=config.NAVIGATION_TIMEOUT)
+            _safety_checks(page)
+
+            _run_flow_1(page, elements, completed_actions, summary)
+
+        summary.all_missing = _dedupe_missing(summary.all_missing)
+        if summary.all_missing:
+            print(f"\n[ai_fallback] Обработка {len(summary.all_missing)} missing элементов...")
+            _run_ai_fallback(page, summary.all_missing, summary)
+
+        if force_test_ai:
+            _run_force_test_ai(page, elements, summary)
+
+        log_event(
+            f"Сценарий завершён: OK={summary.ok}, "
+            f"MISSING={len(summary.all_missing)}, AI={summary.ai_resolved}"
+        )
+        _print_summary(summary)
+        return 0 if not summary.all_missing or summary.ai_resolved == len(summary.all_missing) else 1
+
+    except Exception as exc:
+        screenshot_path = config.BASE_DIR / "error_screenshot.png"
+        try:
+            page.screenshot(path=str(screenshot_path), full_page=False, timeout=10000)
+            log_event(f"Скриншот ошибки сохранён: {screenshot_path}")
+        except Exception as shot_exc:
+            log_event(f"Не удалось сохранить скриншот: {shot_exc}")
+        log_event(f"Критическая ошибка: {exc}")
+        print(f"\nКритическая ошибка: {exc}", file=sys.stderr)
+        print(f"Скриншот: {screenshot_path}", file=sys.stderr)
+        if config.LOG_FILE.exists():
+            print(f"\n--- log.txt (последние 30 строк) ---", file=sys.stderr)
+            lines = config.LOG_FILE.read_text(encoding="utf-8").splitlines()
+            for line in lines[-30:]:
+                print(line, file=sys.stderr)
+        _print_summary(summary)
+        return 2
+    finally:
+        session.close()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    try:
+        sys.exit(run_scenario(headless=args.headless, force_test_ai=args.force_test_ai))
+    except KeyboardInterrupt:
+        log_event("Прервано пользователем")
+        print("\nПрервано пользователем.")
+        sys.exit(130)
+====================
+
+=== FILE: ./merge_code.py ===
+import os
+
+def merge_python_files():
+    output_filename = "all_code.txt"
+    root_dir = os.getcwd()
+    
+    with open(output_filename, "w", encoding="utf-8") as outfile:
+        # Обходим все папки в проекте
+        for root, dirs, files in os.walk(root_dir):
+            # Игнорируем папку виртуального окружения .venv и скрытые папки типа .git или .idea
+            if any(ignored in root for ignored in [".venv", "venv", ".git", ".idea", "__pycache__"]):
+                continue
+                
+            for file in files:
+                # Берем только файлы с кодом Python, исключая сам этот скрипт-склейщик
+                if file.endswith(".py") and file != "merge_code.py":
+                    file_path = os.path.join(root, file)
+                    relative_path = os.path.relpath(file_path, root_dir)
+                    
+                    # Пишем красивый заголовок для нейросети
+                    outfile.write(f"\n\n=== FILE: {relative_path} ===\n")
+                    
+                    # Читаем файл в правильной кодировке UTF-8 и записываем его
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as infile:
+                            outfile.write(infile.read())
+                    except Exception as e:
+                        outfile.write(f"[Ошибка чтения файла: {e}]\n")
+                        
+                    outfile.write("\n====================\n")
+                    
+    print("Успех! Все файлы склеены без ошибок в кодировке в файл all_code.txt")
+
+if __name__ == "__main__":
+    merge_python_files()
+====================
+
+=== FILE: ./test_openrouter.py ===
+"""Проверка OPENROUTER_API_KEY и доступности модели из .env."""
+
+from __future__ import annotations
+
+import sys
+
+from openai import APIStatusError, AuthenticationError, OpenAI, PermissionDeniedError
+
+import config
+
+PROMPT = "Привет, ответь одним словом 'Работает', если ты меня слышишь"
+
+
+def _build_client() -> OpenAI:
+    if not config.OPENROUTER_API_KEY:
+        raise ValueError(
+            "OPENROUTER_API_KEY не задан. Добавьте ключ в файл .env в корне проекта."
+        )
+    return OpenAI(
+        api_key=config.OPENROUTER_API_KEY,
+        base_url=config.OPENROUTER_BASE_URL,
+    )
+
+
+def _format_api_error(exc: APIStatusError) -> str:
+    if exc.status_code == 401:
+        return (
+            "Ошибка 401 Unauthorized: ключ API не принят OpenRouter. "
+            "Проверьте OPENROUTER_API_KEY в .env — возможно, ключ неверный или отозван."
+        )
+    if exc.status_code == 403:
+        return (
+            "Ошибка 403 Forbidden: доступ к API запрещён. "
+            "Проверьте права ключа и настройки аккаунта OpenRouter."
+        )
+    return f"Ошибка API {exc.status_code}: {exc.message}"
+
+
+def main() -> int:
+    model = config.OPENROUTER_MODEL
+    print(f"Модель: {model}")
+    print(f"Base URL: {config.OPENROUTER_BASE_URL}")
+    print("Отправляем тестовый запрос...")
+
+    try:
+        client = _build_client()
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": PROMPT}],
+            temperature=0,
+        )
+        answer = (response.choices[0].message.content or "").strip()
+        print("Успех! API ключ исправен.")
+        print(f"Ответ модели: {answer}")
+        return 0
+
+    except AuthenticationError as exc:
+        print(_format_api_error(exc))
+        return 1
+    except PermissionDeniedError as exc:
+        print(_format_api_error(exc))
+        return 1
+    except APIStatusError as exc:
+        print(_format_api_error(exc))
+        return 1
+    except ValueError as exc:
+        print(f"Ошибка конфигурации: {exc}")
+        return 1
+    except Exception as exc:
+        print(f"Неожиданная ошибка ({type(exc).__name__}): {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+====================
+

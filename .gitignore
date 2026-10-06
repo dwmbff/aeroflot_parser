@@ -1,0 +1,8 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+error_screenshot.png
+log.txt
+new_xpath.txt
