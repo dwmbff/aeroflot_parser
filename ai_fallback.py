@@ -15,8 +15,8 @@ from browser import xpath_locator
 
 HTML_MAX_CHARS = config.AI_HTML_MAX_CHARS
 HTML_CONTEXT_RADIUS = 7500
-RATE_LIMIT_RETRY_DELAY_SEC = 2.5
-MAX_API_ATTEMPTS = 2
+RATE_LIMIT_RETRY_DELAY_SEC = 3
+MAX_API_ATTEMPTS = 3
 
 
 @dataclass
@@ -216,7 +216,7 @@ def _call_openrouter(prompt: str, element_name: str = "unknown") -> str:
             last_error = exc
             _log_ai_api_error(element_name, exc)
             if exc.status_code == 429 and attempt < MAX_API_ATTEMPTS - 1:
-                time.sleep(RATE_LIMIT_RETRY_DELAY_SEC)
+                time.sleep(RATE_LIMIT_RETRY_DELAY_SEC * (attempt + 1))  # пауза растёт: 3 с, 6 с
                 continue
             raise
         except Exception as exc:
