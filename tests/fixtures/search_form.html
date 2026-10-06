@@ -1,0 +1,51 @@
+<!doctype html>
+<!-- Упрощённая модель формы поиска: поля с placeholder, кнопка «Найти» и календарь на 14 месяцев.
+     Классы нарочно бессмысленные (как у styled-components на настоящем сайте).
+     Месяцы строятся от сегодняшней даты, поэтому тест не зависит от дня запуска. -->
+<html lang="ru">
+<body>
+  <div id="form">
+    <input class="sc-a" placeholder="Откуда">
+    <input class="sc-b" placeholder="Куда">
+    <input class="sc-c" placeholder="Туда" readonly>
+    <input class="sc-d" placeholder="Обратно" readonly>
+    <button class="sc-e"><span>Найти</span></button>
+  </div>
+  <div id="calendar"></div>
+  <script>
+    const NAMES = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август',
+                   'Сентябрь','Октябрь','Ноябрь','Декабрь'];
+    const today = new Date();
+    const cal = document.getElementById('calendar');
+    const side = document.createElement('div');
+    const panels = document.createElement('div');
+    cal.append(side, panels);
+
+    const depart = document.querySelector('input[placeholder="Туда"]');
+    const back = document.querySelector('input[placeholder="Обратно"]');
+
+    for (let i = 0; i < 14; i++) {
+      const first = new Date(today.getFullYear(), today.getMonth() + i, 1);
+      const name = NAMES[first.getMonth()];
+
+      const sideItem = document.createElement('button');   // список месяцев слева
+      sideItem.textContent = name;
+      side.append(sideItem);
+
+      const panel = document.createElement('div');
+      const heading = document.createElement('span');      // заголовок панели месяца
+      heading.textContent = name;
+      panel.append(heading);
+      const daysInMonth = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+      for (let d = 1; d <= daysInMonth; d++) {
+        const btn = document.createElement('button');
+        btn.innerHTML = '<div>' + d + '</div><div>5 640 ₽</div>';   // innerText: «6\n5 640 ₽»
+        const iso = first.getFullYear() + '-' + (first.getMonth() + 1) + '-' + d;
+        btn.onclick = () => { (depart.value ? back : depart).value = iso; };
+        panel.append(btn);
+      }
+      panels.append(panel);
+    }
+  </script>
+</body>
+</html>

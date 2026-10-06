@@ -106,5 +106,52 @@ class CheckerAndResolverTests(unittest.TestCase):
             resolver.get_element("нет такого")
 
 
+class SecurityTests(unittest.TestCase):
+    def test_no_api_key_in_tracked_templates(self):
+        import re
+        for name in (".env.example", "README.md", "ANALYTICS.md"):
+            text = (ROOT / name).read_text(encoding="utf-8")
+            self.assertIsNone(re.search(r"sk-or-v1-[A-Za-z0-9]{10,}", text), name)
+
+    def test_env_files_are_git_ignored(self):
+        ignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn(".env", ignore)
+
+    def test_log_text_is_single_line(self):
+        # ответ внешнего сервиса не должен уметь дописывать «чужие» строки в журнал
+        evil = "ok\n[2026-01-01 00:00:00] [OK] fake_element: //x"
+        self.assertNotIn("\n", checker.sanitize_for_log(evil))
+
+    def test_long_log_text_is_truncated(self):
+        self.assertLessEqual(len(checker.sanitize_for_log("a" * 5000, limit=100)), 101)
+
+    def test_implausible_xpath_from_model_is_dropped(self):
+        parse = ai_fallback._parse_model_response
+        def xpath_of(raw_xpath):
+            data = json.dumps({"found": True, "new_xpath": raw_xpath, "confidence": "high", "reasoning": ""})
+            return parse(data).new_xpath
+        self.assertEqual(xpath_of("//input[@placeholder='x']"), "//input[@placeholder='x']")
+        self.assertEqual(xpath_of("rm -rf /"), "")
+        self.assertEqual(xpath_of("//a" + "b" * 600), "")
+        self.assertEqual(xpath_of("//a\n//b"), "")
+
+    def test_unknown_confidence_becomes_low(self):
+        data = json.dumps({"found": True, "new_xpath": "//a", "confidence": "100%", "reasoning": ""})
+        self.assertEqual(ai_fallback._parse_model_response(data).confidence, "low")
+
+    def test_new_xpath_file_line_cannot_be_split(self):
+        import config
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            original = config.NEW_XPATH_FILE
+            config.NEW_XPATH_FILE = Path(tmp) / "new_xpath.txt"
+            try:
+                ai_fallback.write_successful_xpath("el", "//old", "//new\nfake | //x | high", "high")
+                lines = config.NEW_XPATH_FILE.read_text(encoding="utf-8").splitlines()
+            finally:
+                config.NEW_XPATH_FILE = original
+        self.assertEqual(len(lines), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
