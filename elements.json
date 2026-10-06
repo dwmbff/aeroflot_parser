@@ -1,17 +1,27 @@
 [
   {
     "name": "from_input",
-    "xpath": "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[1]/div/div/input",
+    "xpath": "//input[@placeholder='Откуда']",
     "stage": "search_form",
     "action_before": null,
-    "notes": "Поле «Откуда»"
+    "notes": "Поле «Откуда»",
+    "fallbacks": [
+      "input[placeholder*=\"Откуда\" i]",
+      "[aria-label*=\"Откуда\" i] input",
+      "xpath=//label[contains(.,\"Откуда\")]//input"
+    ]
   },
   {
     "name": "to_input",
-    "xpath": "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[2]/div/div/input",
+    "xpath": "//input[@placeholder='Куда']",
     "stage": "search_form",
     "action_before": null,
-    "notes": "Поле «Куда»"
+    "notes": "Поле «Куда»",
+    "fallbacks": [
+      "input[placeholder=\"Куда\" i]",
+      "[aria-label=\"Куда\" i] input",
+      "xpath=//label[normalize-space(.)=\"Куда\"]//input"
+    ]
   },
   {
     "name": "suggest_items",
@@ -23,31 +33,53 @@
   },
   {
     "name": "calendar_open_btn",
-    "xpath": "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[3]/div/div[1]/div/input",
+    "xpath": "//input[@placeholder='Туда']",
     "stage": "search_form",
     "action_before": null,
-    "notes": "Клик открывает календарь"
+    "notes": "Клик открывает календарь",
+    "fallbacks": [
+      "input[placeholder=\"Туда\" i]",
+      "[aria-label*=\"Туда\" i] input"
+    ]
+  },
+  {
+    "name": "return_input",
+    "xpath": "//input[@placeholder='Обратно']",
+    "stage": "search_form",
+    "action_before": null,
+    "fallbacks": [
+      "input[placeholder=\"Обратно\" i]",
+      "[aria-label*=\"Обратно\" i] input"
+    ],
+    "notes": "Поле «Обратно» (дата возврата)"
   },
   {
     "name": "calendar_month_spans",
-    "xpath": "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[3]/div[2]/div/div/div[2]/div/span",
+    "xpath": "//*[not(*) and (normalize-space()='Январь' or normalize-space()='Февраль' or normalize-space()='Март' or normalize-space()='Апрель' or normalize-space()='Май' or normalize-space()='Июнь' or normalize-space()='Июль' or normalize-space()='Август' or normalize-space()='Сентябрь' or normalize-space()='Октябрь' or normalize-space()='Ноябрь' or normalize-space()='Декабрь')]",
     "stage": "calendar",
     "action_before": "open_calendar",
-    "notes": "Список из 10 месяцев в календаре"
+    "notes": "Названия месяцев в календаре (боковой список и заголовки панелей)",
+    "fallbacks": [
+      "text=/^(январь|февраль|март|апрель|май|июнь|июль|август|сентябрь|октябрь|ноябрь|декабрь)$/i"
+    ]
   },
   {
-    "name": "calendar_month_panel_base",
-    "xpath": "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[3]/div[2]/div/div/div[2]/div",
+    "name": "calendar_day_buttons",
+    "xpath": "//button[translate(normalize-space(text()[1]),'0123456789','')='' and normalize-space(text()[1])!='']",
     "stage": "calendar",
     "action_before": "open_calendar",
-    "notes": "Базовый xpath панели месяца, к нему добавляются индексы дней"
+    "notes": "Кнопки-дни в открытом календаре (текст — число месяца)"
   },
   {
     "name": "search_btn",
-    "xpath": "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/button",
+    "xpath": "//button[normalize-space(.)='Найти']",
     "stage": "search_form",
     "action_before": "select_date",
-    "notes": "Кнопка «Поиск»"
+    "notes": "Кнопка «Найти»",
+    "fallbacks": [
+      "role=button[name=\"Найти\"]",
+      "button:has-text(\"Найти\")"
+    ]
   },
   {
     "name": "no_flights_message",
@@ -61,14 +93,20 @@
     "xpath": "//button[.//p[normalize-space(.)='Эконом']]//p[starts-with(normalize-space(.), 'от') and contains(., '₽')]",
     "stage": "results_branch_flights",
     "action_before": "click_search",
-    "notes": "Индикатор, что результаты подгрузились"
+    "notes": "Индикатор, что результаты подгрузились",
+    "fallbacks": [
+      "text=/от\\s*[\\d\\s ]+₽/"
+    ]
   },
   {
     "name": "click_after_results_1",
     "xpath": "(//button[.//p[normalize-space(.)='Эконом']])[1]",
     "stage": "results_flow_1",
     "action_before": "wait_results_ready",
-    "notes": "Клик по первому результату — ветка 1"
+    "notes": "Клик по первому результату — ветка 1",
+    "fallbacks": [
+      "button:has-text(\"Эконом\") >> nth=0"
+    ]
   },
   {
     "name": "price_1a_econom_basic",
@@ -96,7 +134,10 @@
     "xpath": "(//button[.//p[normalize-space(.)='Эконом']])[1]",
     "stage": "results_flow_2",
     "action_before": "open_result2_panel",
-    "notes": "Клик для раскрытия деталей — ветка 2"
+    "notes": "Клик для раскрытия деталей — ветка 2",
+    "fallbacks": [
+      "button:has-text(\"Эконом\") >> nth=0"
+    ]
   },
   {
     "name": "price_2a_econom_basic",
