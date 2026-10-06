@@ -100,11 +100,14 @@ def _check_stage(
 
 
 def _record_inline_check(
+    page: Page,
     summary: RunSummary,
     missing: Optional[dict[str, Any]],
 ) -> None:
     if missing is not None:
         summary.all_missing.append(missing)
+        # inline-проверки тоже отправляем в AI, как и проверки по стадиям
+        _run_ai_fallback(page, [missing], summary)
     else:
         summary.ok += 1
 
@@ -274,7 +277,7 @@ def run_scenario(headless: bool = False, force_test_ai: bool = False) -> int:
         print(f"  Заполняем «Откуда»: {config.FROM_CITY}")
         suggest_el = get_element_by_name(elements, "suggest_items")
         inline_missing = fill_from_input(page, config.FROM_CITY, suggest_el)
-        _record_inline_check(summary, inline_missing)
+        _record_inline_check(page, summary, inline_missing)
         completed_actions.add("fill_from_input")
         _safety_checks(page)
 
@@ -304,6 +307,7 @@ def run_scenario(headless: bool = False, force_test_ai: bool = False) -> int:
         search_btn_el = get_element_by_name(elements, "search_btn")
         if search_btn_el:
             _record_inline_check(
+                page,
                 summary,
                 check_element_inline(page, search_btn_el, require_visible=True),
             )
