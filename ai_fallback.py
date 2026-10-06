@@ -13,7 +13,7 @@ from playwright.sync_api import Page
 import config
 from browser import xpath_locator
 
-HTML_MAX_CHARS = 15000
+HTML_MAX_CHARS = config.AI_HTML_MAX_CHARS
 HTML_CONTEXT_RADIUS = 7500
 RATE_LIMIT_RETRY_DELAY_SEC = 2.5
 MAX_API_ATTEMPTS = 2
