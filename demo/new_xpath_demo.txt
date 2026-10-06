@@ -1,1 +1,5 @@
-price_1a_econom_basic | //div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')]/span[999] | //div[contains(@class,'sc-ggWZvA')][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')]/span[last()] | medium
+from_input | /html/body/div[99]/span | //input[@placeholder='Откуда'] | high
+to_input | /html/body/div[99]/span | //input[@placeholder='Куда'] | high
+calendar_open_btn | /html/body/div[99]/span | //input[@placeholder='Туда'] | medium
+return_input | /html/body/div[99]/span | //input[@placeholder='Обратно'] | high
+search_btn | /html/body/div[99]/span | //button[@id='search-shopper-button'] | high

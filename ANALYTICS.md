@@ -201,54 +201,64 @@ log.txt + new_xpath.txt
 
 ## 7. Пример реального срабатывания AI-фолбэка
 
-Механизм был протестирован не только в теории, но и на реальном кейсе:
-xpath элемента `price_1a_econom_basic` был намеренно испорчен (дописан
-несуществующий узел `/span[999]`), после чего запущен обычный прогон
-скрипта на реальной странице сайта.
+Механизм протестирован на реальном сайте. Для теста xpath пяти основных
+элементов формы поиска (`from_input`, `to_input`, `calendar_open_btn`,
+`return_input`, `search_btn`) намеренно заменён на несуществующий
+`/html/body/div[99]/span`, после чего запущен обычный прогон.
 
-**Шаг 1 — элемент не найден:**
-
-```
-[MISSING] price_1a_econom_basic: //div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')]/span[999]
-```
-
-**Шаг 2 — запрос уходит в ИИ, модель анализирует актуальный HTML и
-отвечает:**
+**Шаг 1 — элементы не найдены по xpath** (в этот момент сценарий не
+останавливается: действия идут через запасные селекторы):
 
 ```
-[AI_OK] price_1a_econom_basic: reasoning=В разметке найден блок с текстом
-«Эконом Базовый». Внутри него присутствует элемент p, содержащий символ ₽,
-но конкретный span-элемент с ценой не указан явно в предоставленном
-фрагменте. Поэтому предлагается использовать последний span внутри этого
-p, что обычно соответствует ценовому тегу.
+[MISSING] from_input: /html/body/div[99]/span
+[MISSING] to_input: /html/body/div[99]/span
+[MISSING] calendar_open_btn: /html/body/div[99]/span
+[MISSING] return_input: /html/body/div[99]/span
 ```
 
-**Шаг 3 — полный сырой ответ модели сохраняется для аудита:**
+**Шаг 2 — запрос уходит в ИИ** (модель `google/gemma-4-31b-it:free`), он
+анализирует актуальный HTML и отвечает:
+
+```
+[AI_OK] from_input: reasoning=Найден input с атрибутом placeholder="Откуда", что соответствует полю «Откуда».
+[AI_OK] calendar_open_btn: reasoning=The input field with placeholder 'Туда' is a date input that likely opens a calendar picker when clicked, matching the description of calendar_open_btn.
+```
+
+**Шаг 3 — сырой ответ модели сохраняется для аудита** (`[AI_RAW]`):
+
 ```json
-{
-  "found": true,
-  "new_xpath": "//div[contains(@class,'sc-ggWZvA')][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')]/span[last()]",
-  "confidence": "medium",
-  "reasoning": "..."
-}
+{"found": true, "new_xpath": "//input[@placeholder='Туда']", "confidence": "medium", "reasoning": "..."}
 ```
 
-**Шаг 4 — итоговая запись в new_xpath.txt:**
+**Шаг 4 — найденные xpath проверяются на странице и записываются в
+`new_xpath.txt`:**
 
 ```
-price_1a_econom_basic | //div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')]/span[999] | //div[contains(@class,'sc-ggWZvA')][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')]/span[last()] | medium
+from_input | /html/body/div[99]/span | //input[@placeholder='Откуда'] | high
+to_input | /html/body/div[99]/span | //input[@placeholder='Куда'] | high
+calendar_open_btn | /html/body/div[99]/span | //input[@placeholder='Туда'] | medium
+return_input | /html/body/div[99]/span | //input[@placeholder='Обратно'] | high
+search_btn | /html/body/div[99]/span | //button[@id='search-shopper-button'] | high
 ```
 
-Важно: модель вернула `confidence: medium`, а не максимальную
-уверенность, потому что конкретный `span` с ценой не был явно выделен в
-обрезанном фрагменте HTML. Модель выбрала наиболее вероятный вариант и
-объяснила свой выбор. Это ожидаемое поведение: результаты с невысокой
-уверенностью помечены как таковые и требуют проверки человеком перед
-использованием в продакшене.
+**Итог прогона:** `OK=14, MISSING=0, AI=5`, код возврата 0. Все пять
+подобранных xpath рабочие.
 
-_Полные лог и результат этого теста сохранены в
-[demo/log_demo_ai_fallback.txt](demo/log_demo_ai_fallback.txt) и
-[demo/new_xpath_demo.txt](demo/new_xpath_demo.txt)._
+Модель вернула `confidence: medium` для `calendar_open_btn`: поле «Туда» не
+называется «кнопкой календаря», и модель выбрала его как наиболее
+вероятный вариант по смыслу. Результаты с невысокой уверенностью
+помечены как таковые и требуют проверки человеком перед использованием в
+продакшене.
+
+Первый запуск этого теста выявил слабое место: для `return_input` модель
+ответила, что в присланном фрагменте нет формы поиска. Обрезка HTML брала
+первое вхождение слова «Обратно» в обычном тексте страницы, а не поле
+формы. После исправления (вхождения внутри `placeholder` и `aria-label`
+теперь предпочтительнее) все пять элементов находятся с первого раза.
+
+_Полные логи сохранены в [demo/log_demo_ai_fallback.txt](demo/log_demo_ai_fallback.txt)
+и [demo/new_xpath_demo.txt](demo/new_xpath_demo.txt). Для сравнения:
+лог штатного прогона без поломок — [demo/log_ok_run.txt](demo/log_ok_run.txt)._
 
 ## 8. Выходные файлы: формат и примеры
 
@@ -269,12 +279,21 @@ _Полные лог и результат этого теста сохране�
 | `[AI_API_ERROR]` | Ошибка при обращении к API (сеть, авторизация, rate limit) |
 | `[AI_FALLBACK_FAILED]` | ИИ не смог найти подходящий элемент |
 
-Пример фрагмента:
+Пример фрагмента (штатный прогон, без поломок):
 
 ```
-[2026-07-11 16:35:26] [MISSING] price_1a_econom_basic: //div[@role='listitem']...
-[2026-07-11 16:35:44] [AI_OK] price_1a_econom_basic: reasoning=...
-[2026-07-11 16:35:44] [EVENT] Сценарий завершён: OK=18, MISSING=1, AI=1
+[2026-10-06 23:22:33] [OK] from_input: //input[@placeholder='Откуда']
+[2026-10-06 23:22:44] [OK] search_btn: //button[normalize-space(.)='Найти']
+[2026-10-06 23:22:48] [OK - not present, branch inactive] no_flights_message: ...
+[2026-10-06 23:22:56] [EVENT] Сценарий завершён: OK=19, MISSING=0, AI=0
+```
+
+Пример фрагмента (прогон с намеренно сломанным xpath):
+
+```
+[2026-10-06 23:25:31] [MISSING] from_input: /html/body/div[99]/span
+[2026-10-06 23:25:50] [AI_OK] from_input: reasoning=Найден input с атрибутом placeholder="Откуда"...
+[2026-10-06 23:26:57] [EVENT] Сценарий завершён: OK=14, MISSING=0, AI=5
 ```
 
 ### new_xpath.txt
@@ -288,7 +307,7 @@ _Полные лог и результат этого теста сохране�
 Пример:
 
 ```
-price_1a_econom_basic | //div[@role='listitem']...//span[999] | //div[contains(@class,'sc-ggWZvA')]...//span[last()] | medium
+search_btn | /html/body/div[99]/span | //button[@id='search-shopper-button'] | high
 ```
 
 ## 9. Структура проекта
@@ -311,6 +330,7 @@ Aeroflot_parser/
 ├── README.md
 ├── ANALYTICS.md             # этот документ
 └── demo/                    # демонстрация AI-фолбэка на реальном кейсе
+    ├── log_ok_run.txt
     ├── log_demo_ai_fallback.txt
     └── new_xpath_demo.txt
 ```

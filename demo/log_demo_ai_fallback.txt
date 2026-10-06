@@ -1,23 +1,32 @@
-[2026-07-11 16:33:57] [EVENT] Запуск сценария: Москва → Санкт-Петербург, headless=False, force_test_ai=False
-[2026-07-11 16:34:12] [OK - not present, optional] popup_ok_btn: //button[.//span[normalize-space()='Хорошо'] or normalize-space()='Хорошо']
-[2026-07-11 16:34:17] [OK - not present, optional] something_went_wrong_title: //*[self::h2 or self::h3][contains(normalize-space(), 'Что-то пошло не так')]
-[2026-07-11 16:34:19] [OK - not present, optional] something_went_wrong_box: /html/body/div/div[2]/div/div/div/div[1]/div[1]/div[1]
-[2026-07-11 16:34:19] [OK] from_input: /html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[1]/div/div/input
-[2026-07-11 16:34:19] [OK] to_input: /html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[2]/div/div/input
-[2026-07-11 16:34:19] [OK] calendar_open_btn: /html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[3]/div/div[1]/div/input
-[2026-07-11 16:34:22] [OK] suggest_items: //div[contains(@class,'dropdown-item')]
-[2026-07-11 16:34:28] [OK] calendar_month_spans: /html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[3]/div[2]/div/div/div[2]/div/span
-[2026-07-11 16:34:28] [OK] calendar_month_panel_base: /html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[3]/div[2]/div/div/div[2]/div
-[2026-07-11 16:35:00] [OK] search_btn: /html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/button
-[2026-07-11 16:35:19] [OK] results_ready_indicator: //button[.//p[normalize-space(.)='Эконом']]//p[starts-with(normalize-space(.), 'от') and contains(., '₽')]
-[2026-07-11 16:35:19] [OK - not present, branch inactive] no_flights_message: /html/body/div/div[2]/div/div/div/div/div/div[3]/div/div/div[3]/div/div[3]/div[2]/h3
-[2026-07-11 16:35:21] [OK] click_after_results_1: (//button[.//p[normalize-space(.)='Эконом']])[1]
-[2026-07-11 16:35:26] [MISSING] price_1a_econom_basic: //div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')]/span[999]
-[2026-07-11 16:35:26] [OK] price_1b_econom_optimum: //div[@role='listitem'][.//p[normalize-space()='Эконом Оптимум']]//p[contains(text(),'₽')]
-[2026-07-11 16:35:31] [OK] open_result2_panel: //div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//button
-[2026-07-11 16:35:31] [OK] click_result2_button: (//button[.//p[normalize-space(.)='Эконом']])[1]
-[2026-07-11 16:35:31] [OK] price_2a_econom_basic: (//div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')])[1]
-[2026-07-11 16:35:31] [OK] price_2b_econom_optimum: (//div[@role='listitem'][.//p[normalize-space()='Эконом Оптимум']]//p[contains(text(),'₽')])[1]
-[2026-07-11 16:35:44] [AI_OK] price_1a_econom_basic: reasoning=В разметке найден блок с текстом «Эконом Базовый». Внутри него присутствует элемент p, содержащий символ ₽, но конкретный span‑элемент с ценой не указан явно в предоставленном фрагменте. Поэтому предлагается использовать последний span внутри этого p, что обычно соответствует ценовому тегу. Это наиболее вероятный аналог старого xpath.
-[2026-07-11 16:35:44] [AI_RAW] price_1a_econom_basic: {"found": true, "new_xpath": "//div[contains(@class,'sc-ggWZvA')][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')]/span[last()]", "confidence": "medium", "reasoning": "В разметке найден блок с текстом «Эконом Базовый». Внутри него присутствует элемент p, содержащий символ ₽, но конкретный span‑элемент с ценой не указан явно в предоставленном фрагменте. Поэтому предлагается использовать последний span внутри этого p, что обычно соответствует ценовому тегу. Это наиболее вероятный аналог старого xpath."}
-[2026-07-11 16:35:44] [EVENT] Сценарий завершён: OK=18, MISSING=1, AI=1
+[2026-10-06 23:25:13] [EVENT] from_input: xpath не сработал, найден запасным селектором input[placeholder*="Откуда" i]
+[2026-10-06 23:25:19] [OK - not present, optional] popup_ok_btn: //button[.//span[normalize-space()='Хорошо'] or normalize-space()='Хорошо']
+[2026-10-06 23:25:24] [OK - not present, optional] something_went_wrong_title: //*[self::h2 or self::h3][contains(normalize-space(), 'Что-то пошло не так')]
+[2026-10-06 23:25:26] [OK - not present, optional] something_went_wrong_box: /html/body/div/div[2]/div/div/div/div[1]/div[1]/div[1]
+[2026-10-06 23:25:31] [MISSING] from_input: /html/body/div[99]/span
+[2026-10-06 23:25:36] [MISSING] to_input: /html/body/div[99]/span
+[2026-10-06 23:25:41] [MISSING] calendar_open_btn: /html/body/div[99]/span
+[2026-10-06 23:25:46] [MISSING] return_input: /html/body/div[99]/span
+[2026-10-06 23:25:50] [AI_OK] from_input: reasoning=Найден input с атрибутом placeholder="Откуда", что соответствует полю «Откуда».
+[2026-10-06 23:25:50] [AI_RAW] from_input: {"found": true, "new_xpath": "//input[@placeholder='Откуда']", "confidence": "high", "reasoning": "Найден input с атрибутом placeholder=\"Откуда\", что соответствует полю «Откуда»."}
+[2026-10-06 23:25:56] [AI_OK] to_input: reasoning=The input element with placeholder 'Куда' corresponds to the 'Поле «Куда»' field described in the task.
+[2026-10-06 23:25:56] [AI_RAW] to_input: {"found": true, "new_xpath": "//input[@placeholder='Куда']", "confidence": "high", "reasoning": "The input element with placeholder 'Куда' corresponds to the 'Поле «Куда»' field described in the task."}
+[2026-10-06 23:26:05] [AI_OK] calendar_open_btn: reasoning=The input field with placeholder 'Туда' is a date input that likely opens a calendar picker when clicked, matching the description of calendar_open_btn.
+[2026-10-06 23:26:05] [AI_RAW] calendar_open_btn: {"found": true, "new_xpath": "//input[@placeholder='Туда']", "confidence": "medium", "reasoning": "The input field with placeholder 'Туда' is a date input that likely opens a calendar picker when clicked, matching the description of calendar_open_btn."}
+[2026-10-06 23:26:26] [AI_OK] return_input: reasoning=На странице найден input с атрибутом placeholder="Обратно", что точно соответствует полю даты возврата.
+[2026-10-06 23:26:26] [AI_RAW] return_input: {"found": true, "new_xpath": "//input[@placeholder='Обратно']", "confidence": "high", "reasoning": "На странице найден input с атрибутом placeholder=\"Обратно\", что точно соответствует полю даты возврата."}
+[2026-10-06 23:26:28] [OK] suggest_items: //div[contains(@class,'dropdown-item')]
+[2026-10-06 23:26:35] [OK] calendar_month_spans: //*[not(*) and (normalize-space()='Январь' or normalize-space()='Февраль' or normalize-space()='Март' or normalize-space()='Апрель' or normalize-space()='Май' or normalize-space()='Июнь' or normalize-space()='Июль' or normalize-space()='Август' or normalize-space()='Сентябрь' or normalize-space()='Октябрь' or normalize-space()='Ноябрь' or normalize-space()='Декабрь')]
+[2026-10-06 23:26:35] [OK] calendar_day_buttons: //button[translate(normalize-space(text()[1]),'0123456789','')='' and normalize-space(text()[1])!='']
+[2026-10-06 23:26:42] [MISSING] search_btn: /html/body/div[99]/span
+[2026-10-06 23:26:46] [AI_OK] search_btn: reasoning=Кнопка с текстом 'Найти' имеет уникальный атрибут id='search-shopper-button'.
+[2026-10-06 23:26:46] [AI_RAW] search_btn: {"found": true, "new_xpath": "//button[@id='search-shopper-button']", "confidence": "high", "reasoning": "Кнопка с текстом 'Найти' имеет уникальный атрибут id='search-shopper-button'."}
+[2026-10-06 23:26:50] [OK] results_ready_indicator: //button[.//p[normalize-space(.)='Эконом']]//p[starts-with(normalize-space(.), 'от') and contains(., '₽')]
+[2026-10-06 23:26:50] [OK - not present, branch inactive] no_flights_message: /html/body/div/div[2]/div/div/div/div/div/div[3]/div/div/div[3]/div/div[3]/div[2]/h3
+[2026-10-06 23:26:53] [OK] click_after_results_1: (//button[.//p[normalize-space(.)='Эконом']])[1]
+[2026-10-06 23:26:53] [OK] price_1a_econom_basic: //div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')]
+[2026-10-06 23:26:53] [OK] price_1b_econom_optimum: //div[@role='listitem'][.//p[normalize-space()='Эконом Оптимум']]//p[contains(text(),'₽')]
+[2026-10-06 23:26:57] [OK] open_result2_panel: //div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//button
+[2026-10-06 23:26:57] [OK] click_result2_button: (//button[.//p[normalize-space(.)='Эконом']])[1]
+[2026-10-06 23:26:57] [OK] price_2a_econom_basic: (//div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')])[1]
+[2026-10-06 23:26:57] [OK] price_2b_econom_optimum: (//div[@role='listitem'][.//p[normalize-space()='Эконом Оптимум']]//p[contains(text(),'₽')])[1]
+[2026-10-06 23:26:57] [EVENT] Сценарий завершён: OK=14, MISSING=0, AI=5
