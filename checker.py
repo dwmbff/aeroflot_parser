@@ -126,8 +126,10 @@ def _evaluate_element(
 ) -> tuple[bool, bool]:
     """
     Проверить один элемент.
+    require_visible управляет строгостью поиска (видимость vs просто наличие в DOM)
+    и НЕ связан с тем, обязателен элемент или нет — это отдельная проверка
+    через _is_optional() ниже.
     Возвращает (found, optional_absent_ok).
-    optional_absent_ok=True — опциональный элемент отсутствует (считается OK).
     """
     xpath = element.get("xpath", "")
     if require_visible and element.get("stage") == "global_error" and elements is not None:
@@ -244,7 +246,7 @@ def check_elements(
         found, optional_absent = _evaluate_element(
             page,
             element,
-            require_visible=_is_optional(element),
+            require_visible=True,
             elements=elements if current_stage == "global_error" else None,
         )
         if found:

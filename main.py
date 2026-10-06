@@ -14,7 +14,7 @@ from datetime import date, timedelta
 from typing import Any, Optional
 
 import config
-from ai_fallback import find_alternative_xpath, write_successful_xpath
+import resolver
 from browser import (
     accept_cookies,
     check_and_close_popup,
@@ -94,6 +94,9 @@ def _check_stage(
     summary.ok += result.ok_count
     summary.skipped += result.skipped_count
     summary.all_missing.extend(result.missing)
+    # AI подбираем сразу: пока страница в состоянии этой стадии, элемент ещё есть в HTML
+    if result.missing:
+        _run_ai_fallback(page, result.missing, summary)
 
 
 def _record_inline_check(
@@ -172,32 +175,17 @@ def _run_ai_fallback(
     missing_elements: list[dict[str, Any]],
     summary: RunSummary,
 ) -> None:
-    seen: set[str] = set()
+    """
+    Для каждого пропавшего обязательного элемента просим AI новый xpath.
+    Найденный xpath проверяется на странице и подставляется в elements (в памяти),
+    поэтому дальше сценарий использует уже исправленный путь.
+    """
     for element in missing_elements:
-        if element.get("optional"):
-            continue
         name = element.get("name", "")
-        if name in seen:
+        if element.get("optional") or name in resolver.ai_attempted:
             continue
-        seen.add(name)
-
-        element_info = {
-            "name": name,
-            "xpath": element.get("xpath", ""),
-            "notes": element.get("notes", ""),
-        }
-        page_html = page.content()
-        result = find_alternative_xpath(element_info, page_html)
-        if result is None:
-            continue
-
-        write_successful_xpath(
-            element_name=name,
-            old_xpath=element_info["xpath"],
-            new_xpath=result.new_xpath,
-            confidence=result.confidence,
-        )
-        summary.ai_resolved += 1
+        resolver.try_ai_fix(page, element)
+    summary.ai_resolved = len(resolver.ai_fixed)
 
 
 def _run_force_test_ai(
@@ -220,10 +208,11 @@ def _run_force_test_ai(
     log_event(f"force-test-ai: искусственно помечен как MISSING: {name}")
     print(f"\n[force-test-ai] Тест AI fallback для элемента: {name}")
 
-    before_resolved = summary.ai_resolved
-    _run_ai_fallback(page, [picked], summary)
+    resolver.ai_attempted.add(name)
+    fixed = resolver.try_ai_fix(page, picked, apply=False)
+    summary.ai_resolved = len(resolver.ai_fixed)
 
-    if summary.ai_resolved > before_resolved:
+    if fixed:
         log_event(f"force-test-ai: AI fallback успешен для {name}")
         print(f"[force-test-ai] AI fallback успешен для {name}")
     else:
@@ -232,15 +221,23 @@ def _run_force_test_ai(
         summary.all_missing.append(picked)
 
 
+def _unresolved(summary: RunSummary) -> list[dict[str, Any]]:
+    """Missing-элементы, для которых AI так и не нашёл рабочий xpath."""
+    return [
+        el for el in _dedupe_missing(summary.all_missing)
+        if el.get("name") not in resolver.ai_fixed
+    ]
+
+
 def _print_summary(summary: RunSummary) -> None:
     summary.all_missing = _dedupe_missing(summary.all_missing)
-    summary.missing = len(summary.all_missing)
+    summary.missing = len(_unresolved(summary))
     print("\n" + "=" * 50)
     print("SUMMARY")
     print("=" * 50)
     print(f"  OK:                 {summary.ok}")
     print(f"  MISSING:            {summary.missing}")
-    print(f"  SKIPPED (alt flow): {summary.skipped}")
+    print(f"  SKIPPED (inactive):  {summary.skipped}")
     print(f"  AI resolved:        {summary.ai_resolved}")
     print("=" * 50)
     print(f"  Лог:         {config.LOG_FILE}")
@@ -249,25 +246,19 @@ def _print_summary(summary: RunSummary) -> None:
 
 def run_scenario(headless: bool = False, force_test_ai: bool = False) -> int:
     elements = load_elements()
+    resolver.set_elements(elements)
     completed_actions: set[str] = set()
     summary = RunSummary()
 
     config.LOG_FILE.write_text("", encoding="utf-8")
-    if force_test_ai:
-        config.NEW_XPATH_FILE.write_text("", encoding="utf-8")
-    log_event(
-        f"Запуск сценария: {config.FROM_CITY} → {config.TO_CITY}, "
-        f"headless={headless}, force_test_ai={force_test_ai}"
-    )
-    print(f"Открываем {config.BASE_URL} (headless={headless})")
-
+    config.NEW_XPATH_FILE.write_text("", encoding="utf-8") 
+    
     session = launch_browser(headless=headless)
     page = session.page
 
     try:
         if _safety_checks(page):
             _check_stage(page, elements, "global_error", completed_actions, summary)
-            _run_ai_fallback(page, summary.all_missing, summary)
             _print_summary(summary)
             return 1
 
@@ -306,7 +297,7 @@ def run_scenario(headless: bool = False, force_test_ai: bool = False) -> int:
 
         return_target = date.today() + timedelta(days=config.RETURN_DAYS_AHEAD)
         print(f"  Выбираем дату (обратно): {return_target.isoformat()}")
-        select_date(page, return_target)
+        select_date(page, return_target, "return_input")
         completed_actions.add("select_return_date")
         _safety_checks(page)
 
@@ -335,33 +326,29 @@ def run_scenario(headless: bool = False, force_test_ai: bool = False) -> int:
             results_ready_el = get_element_by_name(elements, "results_ready_indicator")
             if results_ready_el:
                 check_branch_inactive_element(page, results_ready_el)
-                summary.ok += 1
+                summary.skipped += 1
         else:
             print("  Ветка: рейсы найдены")
             _check_stage(page, elements, "results_branch_flights", completed_actions, summary)
             if no_flights_el:
                 check_branch_inactive_element(page, no_flights_el)
-                summary.ok += 1
+                summary.skipped += 1
 
             # ТУДА → ОБРАТНО, без перезагрузки страницы:
             # после выбора тарифа "туда" сайт сам показывает рейсы обратного направления
             _run_flow_1(page, elements, completed_actions, summary)
             _run_flow_2(page, elements, completed_actions, summary)
 
-        summary.all_missing = _dedupe_missing(summary.all_missing)
-        if summary.all_missing:
-            print(f"\n[ai_fallback] Обработка {len(summary.all_missing)} missing элементов...")
-            _run_ai_fallback(page, summary.all_missing, summary)
-
         if force_test_ai:
             _run_force_test_ai(page, elements, summary)
 
+        unresolved = _unresolved(summary)
         log_event(
             f"Сценарий завершён: OK={summary.ok}, "
-            f"MISSING={len(summary.all_missing)}, AI={summary.ai_resolved}"
+            f"MISSING={len(unresolved)}, AI={summary.ai_resolved}"
         )
         _print_summary(summary)
-        return 0 if not summary.all_missing or summary.ai_resolved == len(summary.all_missing) else 1
+        return 1 if unresolved else 0
 
     except Exception as exc:
         screenshot_path = config.BASE_DIR / "error_screenshot.png"
