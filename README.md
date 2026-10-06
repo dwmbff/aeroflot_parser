@@ -15,7 +15,7 @@ xpath через ИИ при обнаружении поломки.
 3. Ищет элементы устойчиво к смене вёрстки, в три шага (`resolver.py`):
    xpath → запасные селекторы `fallbacks` (по placeholder, тексту, роли) → ИИ
 4. Если xpath не сработал, получает HTML страницы и запрашивает у ИИ
-   (OpenRouter, модель `openai/gpt-oss-20b:free`) альтернативный xpath;
+   (OpenRouter, модель `google/gemma-4-31b-it:free`) альтернативный xpath;
    найденный xpath проверяется на странице и подставляется в сценарий
 5. Формирует `log.txt`, `new_xpath.txt` и аналитический отчёт
 
@@ -35,7 +35,7 @@ playwright install chromium
 Скопируйте .env.example → .env, впишите ключ OpenRouter:
 ```bash
 OPENROUTER_API_KEY=ваш_ключ_с_openrouter.ai
-OPENROUTER_MODEL=openai/gpt-oss-20b:free
+OPENROUTER_MODEL=google/gemma-4-31b-it:free
 ```
 ## Запуск
 ```bash
@@ -43,11 +43,13 @@ python test_openrouter.py        # проверка ключа API
 python main.py                    # с видимым браузером
 python main.py --headless          # без интерфейса
 python main.py --force-test-ai      # тест AI-фолбэка на сломанном элементе
+python -m unittest discover -s tests   # быстрые тесты без браузера и сети
 ```
 ## Структура проекта
 | Путь                                                                 | Назначение          |
 | -------------------------------------------------------------------- | ------------------- |
 | `main.py`, `config.py`, `browser.py`, `checker.py`, `ai_fallback.py` | код                 |
+| `tests/`                                                             | юнит-тесты          |
 | `resolver.py`                                                        | поиск элементов: xpath → fallbacks → ИИ |
 | `elements.json`                                                      | xpath и запасные селекторы |
 | `log.txt`, `new_xpath.txt`                                           | результаты прогона  |
