@@ -1,0 +1,139 @@
+[
+  {
+    "name": "from_input",
+    "xpath": "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[1]/div/div/input",
+    "stage": "search_form",
+    "action_before": null,
+    "notes": "Поле «Откуда»"
+  },
+  {
+    "name": "to_input",
+    "xpath": "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[2]/div/div/input",
+    "stage": "search_form",
+    "action_before": null,
+    "notes": "Поле «Куда»"
+  },
+  {
+    "name": "suggest_items",
+    "xpath": "//div[contains(@class,'dropdown-item')]",
+    "stage": "from_dropdown",
+    "action_before": null,
+    "inline_only": true,
+    "notes": "Подсказки городов — проверяется inline в fill_from_input до клика по подсказке"
+  },
+  {
+    "name": "calendar_open_btn",
+    "xpath": "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[3]/div/div[1]/div/input",
+    "stage": "search_form",
+    "action_before": null,
+    "notes": "Клик открывает календарь"
+  },
+  {
+    "name": "calendar_month_spans",
+    "xpath": "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[3]/div[2]/div/div/div[2]/div/span",
+    "stage": "calendar",
+    "action_before": "open_calendar",
+    "notes": "Список из 10 месяцев в календаре"
+  },
+  {
+    "name": "calendar_month_panel_base",
+    "xpath": "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/div/div/div/div[3]/div[2]/div/div/div[2]/div",
+    "stage": "calendar",
+    "action_before": "open_calendar",
+    "notes": "Базовый xpath панели месяца, к нему добавляются индексы дней"
+  },
+  {
+    "name": "search_btn",
+    "xpath": "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div[2]/div/div[2]/button",
+    "stage": "search_form",
+    "action_before": "select_date",
+    "notes": "Кнопка «Поиск»"
+  },
+  {
+    "name": "no_flights_message",
+    "xpath": "/html/body/div/div[2]/div/div/div/div/div/div[3]/div/div/div[3]/div/div[3]/div[2]/h3",
+    "stage": "results_branch_empty",
+    "action_before": "click_search",
+    "notes": "Появляется, если рейсов нет — альтернативная ветка к results_ready"
+  },
+  {
+    "name": "results_ready_indicator",
+    "xpath": "//button[.//p[normalize-space(.)='Эконом']]//p[starts-with(normalize-space(.), 'от') and contains(., '₽')]",
+    "stage": "results_branch_flights",
+    "action_before": "click_search",
+    "notes": "Индикатор, что результаты подгрузились"
+  },
+  {
+    "name": "click_after_results_1",
+    "xpath": "(//button[.//p[normalize-space(.)='Эконом']])[1]",
+    "stage": "results_flow_1",
+    "action_before": "wait_results_ready",
+    "notes": "Клик по первому результату — ветка 1"
+  },
+  {
+    "name": "price_1a_econom_basic",
+    "xpath": "//div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')]",
+    "stage": "results_flow_1",
+    "action_before": "click_after_results_1",
+    "notes": "Цена «Эконом Базовый», ветка 1"
+  },
+  {
+    "name": "price_1b_econom_optimum",
+    "xpath": "//div[@role='listitem'][.//p[normalize-space()='Эконом Оптимум']]//p[contains(text(),'₽')]",
+    "stage": "results_flow_1",
+    "action_before": "click_after_results_1",
+    "notes": "Цена «Эконом Оптимум», ветка 1"
+  },
+  {
+    "name": "open_result2_panel",
+    "xpath": "//div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//button",
+    "stage": "results_flow_2",
+    "action_before": "wait_results_ready",
+    "notes": "Открытие альтернативной панели тарифов — ветка 2"
+  },
+  {
+    "name": "click_result2_button",
+    "xpath": "(//button[.//p[normalize-space(.)='Эконом']])[1]",
+    "stage": "results_flow_2",
+    "action_before": "open_result2_panel",
+    "notes": "Клик для раскрытия деталей — ветка 2"
+  },
+  {
+    "name": "price_2a_econom_basic",
+    "xpath": "(//div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')])[1]",
+    "stage": "results_flow_2",
+    "action_before": "click_result2_button",
+    "notes": "Цена «Эконом Базовый», ветка 2"
+  },
+  {
+    "name": "price_2b_econom_optimum",
+    "xpath": "(//div[@role='listitem'][.//p[normalize-space()='Эконом Оптимум']]//p[contains(text(),'₽')])[1]",
+    "stage": "results_flow_2",
+    "action_before": "click_result2_button",
+    "notes": "Цена «Эконом Оптимум», ветка 2"
+  },
+  {
+    "name": "popup_ok_btn",
+    "xpath": "//button[.//span[normalize-space()='Хорошо'] or normalize-space()='Хорошо']",
+    "stage": "global_popup",
+    "action_before": null,
+    "optional": true,
+    "notes": "Может появиться в любой момент, нужно проверять/закрывать перед остальными шагами"
+  },
+  {
+    "name": "something_went_wrong_title",
+    "xpath": "//*[self::h2 or self::h3][contains(normalize-space(), 'Что-то пошло не так')]",
+    "stage": "global_error",
+    "action_before": null,
+    "optional": true,
+    "notes": "Признак ошибки на странице"
+  },
+  {
+    "name": "something_went_wrong_box",
+    "xpath": "/html/body/div/div[2]/div/div/div/div[1]/div[1]/div[1]",
+    "stage": "global_error",
+    "action_before": null,
+    "optional": true,
+    "notes": "Контейнер блока ошибки"
+  }
+]

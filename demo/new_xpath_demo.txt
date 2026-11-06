@@ -1,0 +1,1 @@
+price_1a_econom_basic | //div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')]/span[999] | //div[contains(@class,'sc-ggWZvA')][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')]/span[last()] | medium
