@@ -1,0 +1,21 @@
+[2026-10-06 23:22:26] [OK - not present, optional] popup_ok_btn: //button[.//span[normalize-space()='Хорошо'] or normalize-space()='Хорошо']
+[2026-10-06 23:22:31] [OK - not present, optional] something_went_wrong_title: //*[self::h2 or self::h3][contains(normalize-space(), 'Что-то пошло не так')]
+[2026-10-06 23:22:33] [OK - not present, optional] something_went_wrong_box: /html/body/div/div[2]/div/div/div/div[1]/div[1]/div[1]
+[2026-10-06 23:22:33] [OK] from_input: //input[@placeholder='Откуда']
+[2026-10-06 23:22:33] [OK] to_input: //input[@placeholder='Куда']
+[2026-10-06 23:22:33] [OK] calendar_open_btn: //input[@placeholder='Туда']
+[2026-10-06 23:22:33] [OK] return_input: //input[@placeholder='Обратно']
+[2026-10-06 23:22:35] [OK] suggest_items: //div[contains(@class,'dropdown-item')]
+[2026-10-06 23:22:42] [OK] calendar_month_spans: //*[not(*) and (normalize-space()='Январь' or normalize-space()='Февраль' or normalize-space()='Март' or normalize-space()='Апрель' or normalize-space()='Май' or normalize-space()='Июнь' or normalize-space()='Июль' or normalize-space()='Август' or normalize-space()='Сентябрь' or normalize-space()='Октябрь' or normalize-space()='Ноябрь' or normalize-space()='Декабрь')]
+[2026-10-06 23:22:42] [OK] calendar_day_buttons: //button[translate(normalize-space(text()[1]),'0123456789','')='' and normalize-space(text()[1])!='']
+[2026-10-06 23:22:44] [OK] search_btn: //button[normalize-space(.)='Найти']
+[2026-10-06 23:22:48] [OK] results_ready_indicator: //button[.//p[normalize-space(.)='Эконом']]//p[starts-with(normalize-space(.), 'от') and contains(., '₽')]
+[2026-10-06 23:22:48] [OK - not present, branch inactive] no_flights_message: /html/body/div/div[2]/div/div/div/div/div/div[3]/div/div/div[3]/div/div[3]/div[2]/h3
+[2026-10-06 23:22:51] [OK] click_after_results_1: (//button[.//p[normalize-space(.)='Эконом']])[1]
+[2026-10-06 23:22:51] [OK] price_1a_econom_basic: //div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')]
+[2026-10-06 23:22:51] [OK] price_1b_econom_optimum: //div[@role='listitem'][.//p[normalize-space()='Эконом Оптимум']]//p[contains(text(),'₽')]
+[2026-10-06 23:22:56] [OK] open_result2_panel: //div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//button
+[2026-10-06 23:22:56] [OK] click_result2_button: (//button[.//p[normalize-space(.)='Эконом']])[1]
+[2026-10-06 23:22:56] [OK] price_2a_econom_basic: (//div[@role='listitem'][.//p[normalize-space()='Эконом Базовый']]//p[contains(text(),'₽')])[1]
+[2026-10-06 23:22:56] [OK] price_2b_econom_optimum: (//div[@role='listitem'][.//p[normalize-space()='Эконом Оптимум']]//p[contains(text(),'₽')])[1]
+[2026-10-06 23:22:56] [EVENT] Сценарий завершён: OK=19, MISSING=0, AI=0
